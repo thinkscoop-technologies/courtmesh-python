@@ -1,0 +1,455 @@
+"""One test per endpoint method, plus envelope unwrapping checks."""
+from helpers import FakeResponse
+
+
+# -- 1. GET /judges/search --------------------------------------------------
+
+
+def test_search_judges_with_query(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data=["JUSTICE A B", "JUSTICE C D"],
+        meta={"query": "khanna", "responseTime": "3ms", "totalMatches": 2},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.search_judges("khanna")
+
+    assert result.data == ["JUSTICE A B", "JUSTICE C D"]
+    assert result.meta["totalMatches"] == 2
+    method, url = mock_request.call_args.args
+    assert method == "GET"
+    assert url.endswith("/judges/search")
+    assert mock_request.call_args.kwargs["params"] == {"q": "khanna"}
+
+
+def test_search_judges_default_empty_query(make_client, envelope):
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(200, envelope(data=["A"] * 50, meta={"query": "", "responseTime": "1ms", "totalMatches": 50}))
+
+    result = client.search_judges()
+
+    assert len(result.data) == 50
+    assert mock_request.call_args.kwargs["params"] is None
+
+
+# -- 2. POST /search/cases ---------------------------------------------------
+
+
+def test_search_cases_sends_query_and_optional_filters(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data=[{"_id": "1", "title": "State v. X", "_score": 4.2, "_sort": [4.2, "1"]}],
+        meta={"query": "state", "filters": {"court": "Delhi High Court"}, "responseTime": "10ms"},
+        pagination={"total": 1, "hasMore": False, "page": 1, "limit": 20, "nextCursor": None},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.search_cases(
+        query="state",
+        court="Delhi High Court",
+        year=2021,
+        caseNumber="123/2021",
+        judgeName="Justice X",
+        fromDate="2020-01-01",
+        toDate="2021-01-01",
+        page=1,
+        limit=20,
+        sortBy="relevance",
+    )
+
+    assert result.data[0]["title"] == "State v. X"
+    assert result.meta["filters"]["court"] == "Delhi High Court"
+    assert result.pagination["total"] == 1
+    assert result.pagination["nextCursor"] is None
+
+    method, url = mock_request.call_args.args
+    assert method == "POST"
+    assert url.endswith("/search/cases")
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body["query"] == "state"
+    assert sent_body["court"] == "Delhi High Court"
+    assert sent_body["year"] == 2021
+    assert sent_body["caseNumber"] == "123/2021"
+    assert sent_body["sortBy"] == "relevance"
+
+
+def test_search_cases_omits_unset_optional_fields(make_client, envelope):
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(
+        200,
+        envelope(data=[], meta={"query": "x", "filters": {}, "responseTime": "1ms"}, pagination={"total": 0, "hasMore": False, "limit": 20}),
+    )
+
+    client.search_cases(query="x")
+
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body == {"query": "x"}
+
+
+# -- 3. POST /search/cases/semantic ------------------------------------------
+
+
+def test_semantic_search_uses_filters_object(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data=[
+            {
+                "id": "1",
+                "caseNumber": "1/2020",
+                "title": "Right to Privacy",
+                "court": "Supreme Court",
+                "caseType": "WP",
+                "judges": ["JUSTICE A"],
+                "petitioners": ["P"],
+                "respondents": ["R"],
+                "decisionDate": "2020-01-01",
+                "disposalNature": "Allowed",
+                "summary": "...",
+                "hasDocuments": True,
+                "hasAnalysis": True,
+                "similarity": 0.87,
+            }
+        ],
+        meta={"query": "privacy", "appliedFilters": {"court": "Supreme Court"}, "responseTime": "40ms", "searchType": "semantic"},
+        pagination={"page": 1, "limit": 20, "total": 1, "totalPages": 1, "hasMore": False},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.semantic_search(
+        query="right to privacy",
+        filters={"court": "Supreme Court", "decisionDate": {"$gte": "2019-01-01"}},
+    )
+
+    assert result.data[0]["similarity"] == 0.87
+    assert result.meta["searchType"] == "semantic"
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body["filters"] == {"court": "Supreme Court", "decisionDate": {"$gte": "2019-01-01"}}
+
+
+# -- 4. GET /cases/{id} -------------------------------------------------------
+
+
+def test_get_case(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "id": "64f0abc",
+            "caseNumber": "123/2021",
+            "title": "State v. X",
+            "court": "Delhi High Court",
+            "caseType": "Criminal Appeal",
+            "judges": ["JUSTICE A"],
+            "petitioners": ["State"],
+            "respondents": ["X"],
+            "decisionDate": "2021-05-01",
+            "disposalNature": "Dismissed",
+            "summary": "...",
+            "hasDocuments": True,
+            "documentCount": 3,
+            "hasAnalysis": False,
+        },
+        meta={"responseTime": "5ms", "note": "Use /cases/:id/analysis endpoint to get AI analysis separately"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_case("64f0abc")
+
+    assert result.data["caseNumber"] == "123/2021"
+    assert "detailedSummary" not in result.data
+    method, url = mock_request.call_args.args
+    assert method == "GET"
+    assert url.endswith("/cases/64f0abc")
+
+
+# -- 5. GET /cases/{id}/analysis ----------------------------------------------
+
+
+def test_get_case_analysis_when_missing(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={"id": "1", "caseNumber": "123/2021", "hasAnalysis": False, "message": "AI analysis not available for this case"},
+        meta={"responseTime": "2ms", "note": "Use POST /cases/:id/analyze to generate AI analysis"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_case_analysis("1")
+
+    assert result.data["hasAnalysis"] is False
+    assert "analysis" not in result.data
+
+
+def test_get_case_analysis_when_present(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "id": "1",
+            "caseNumber": "123/2021",
+            "hasAnalysis": True,
+            "analysis": {
+                "summary": "...",
+                "keyFacts": ["fact 1"],
+                "issues": [{"question": "Was X liable?", "holding": "Yes"}],
+                "citedCases": {"followed": ["A v B"]},
+                "arguments": {"petitioner": ["arg 1"]},
+                "practiceAreas": ["Criminal"],
+                "legalPrinciples": ["principle 1"],
+            },
+        },
+        meta={"responseTime": "2ms", "note": ""},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_case_analysis("1")
+
+    assert result.data["hasAnalysis"] is True
+    assert result.data["analysis"]["issues"][0]["holding"] == "Yes"
+    method, url = mock_request.call_args.args
+    assert url.endswith("/cases/1/analysis")
+
+
+# -- 6. GET /cases/{id}/related -----------------------------------------------
+
+
+def test_get_related_with_documents(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "relatedDocuments": [
+                {"id": "1", "title": "Order 1", "caseNumber": "123/2021", "court": "Delhi High Court", "decisionDate": "2021-01-01", "caseType": "CRL", "isCurrent": True}
+            ],
+            "timeline": [{"date": "2021-01-01", "status": "Case Initiated", "statusLabel": "Case Initiated", "documentId": "1"}],
+        },
+        meta={"responseTime": "3ms", "caseNumber": "123/2021", "totalDocuments": 1, "timelineEvents": 1},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_related("1")
+
+    assert result.data["relatedDocuments"][0]["isCurrent"] is True
+    assert result.data["timeline"][0]["status"] == "Case Initiated"
+    assert result.meta["totalDocuments"] == 1
+
+
+def test_get_related_without_case_number(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={"relatedDocuments": [], "timeline": []},
+        meta={"responseTime": "1ms", "message": "No case number found for this case"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_related("1")
+
+    assert result.data["relatedDocuments"] == []
+    assert result.meta["message"] == "No case number found for this case"
+
+
+# -- 7. GET /cases/{id}/pdf ----------------------------------------------------
+
+
+def test_get_case_pdf(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={"pdfUrl": "ENCRYPTED_CIPHERTEXT", "expiresIn": 3600, "caseId": "1", "caseNumber": "123/2021", "caseTitle": "State v. X"},
+        meta={"responseTime": "2ms", "note": "The PDF URL is encrypted and expires in 1 hour. Use the decryption key provided in your SDK."},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_case_pdf("1")
+
+    assert result.data["expiresIn"] == 3600
+    assert result.data["pdfUrl"] == "ENCRYPTED_CIPHERTEXT"
+    method, url = mock_request.call_args.args
+    assert url.endswith("/cases/1/pdf")
+
+
+# -- 8. POST /cases/{id}/analyze -----------------------------------------------
+
+
+def test_analyze_case_started(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={"message": "Analysis has been started", "status": "processing"},
+        meta={"responseTime": "1ms", "note": "You can check the analysis status by calling the GET /cases/:id endpoint in 30-60 seconds."},
+    )
+    mock_request.return_value = FakeResponse(202, body)
+
+    result = client.analyze_case("1")
+
+    assert result.data["status"] == "processing"
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body == {"force": False}
+
+
+def test_analyze_case_already_exists(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={"message": "Analysis already exists", "analysis": {"summary": "..."}, "alreadyExists": True},
+        meta={"responseTime": "1ms", "note": ""},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.analyze_case("1", force=False)
+
+    assert result.data["alreadyExists"] is True
+
+
+def test_analyze_case_force(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(data={"message": "Analysis has been started", "status": "processing"}, meta={"responseTime": "1ms", "note": ""})
+    mock_request.return_value = FakeResponse(202, body)
+
+    client.analyze_case("1", force=True)
+
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body == {"force": True}
+
+
+# -- 9. POST /cases/{id}/analyze-consolidated ----------------------------------
+
+
+def test_analyze_consolidated_success(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "status": "success",
+            "consolidatedAnalysis": {"summary": "...", "benchComposition": "Division Bench", "opinionType": "Majority"},
+            "message": "Consolidated analysis complete",
+        },
+        meta={"responseTime": "12000ms", "relatedCases": 5},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.analyze_consolidated("1")
+
+    assert result.data["status"] == "success"
+    assert result.data["consolidatedAnalysis"]["benchComposition"] == "Division Bench"
+    assert result.meta["relatedCases"] == 5
+    method, url = mock_request.call_args.args
+    assert url.endswith("/cases/1/analyze-consolidated")
+
+
+def test_analyze_consolidated_already_analyzed(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={"status": "already_analyzed", "consolidatedAnalysis": {"summary": "..."}, "message": "Consolidated analysis already exists"},
+        meta={"responseTime": "3ms"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.analyze_consolidated("1", force=False)
+
+    assert result.data["status"] == "already_analyzed"
+    assert "relatedCases" not in result.meta
+
+
+# -- 10. POST /request-timeline -------------------------------------------------
+
+
+def test_request_timeline_pending(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(data={"requestId": "job-1", "status": "pending"}, meta={"responseTime": "2ms"})
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.request_timeline("64f0abc0000000000000001")
+
+    assert result.data["status"] == "pending"
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body == {"case_id": "64f0abc0000000000000001"}
+
+
+def test_request_timeline_supreme_court_case(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "requestId": "64f0abc0000000000000001",
+            "status": "completed",
+            "orderCount": 0,
+            "orders": [],
+            "message": "Supreme Court cases do not have separate orders. ...",
+        },
+        meta={"responseTime": "1ms"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.request_timeline("64f0abc0000000000000001")
+
+    assert result.data["orderCount"] == 0
+    assert result.data["orders"] == []
+
+
+def test_request_timeline_cached(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={"requestId": "job-1", "status": "completed", "cached": True, "orderCount": 2, "orders": [{"_id": "o1"}, {"_id": "o2"}]},
+        meta={"responseTime": "1ms"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.request_timeline("64f0abc0000000000000001")
+
+    assert result.data["cached"] is True
+    assert len(result.data["orders"]) == 2
+
+
+# -- 11. GET /get-timeline/{requestId} -------------------------------------------
+
+
+def test_get_timeline_in_progress(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={"requestId": "job-1", "status": "pending", "createdAt": "2026-08-10T09:00:00.000Z", "updatedAt": "2026-08-10T09:00:00.000Z"},
+        meta={"responseTime": "2ms"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_timeline("job-1")
+
+    assert result.data["status"] == "pending"
+    method, url = mock_request.call_args.args
+    assert url.endswith("/get-timeline/job-1")
+
+
+def test_get_timeline_completed_omits_result_when_total_order_count_present(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "requestId": "job-1",
+            "status": "completed",
+            "createdAt": "2026-08-10T09:00:00.000Z",
+            "updatedAt": "2026-08-10T09:05:00.000Z",
+            "startedAt": "2026-08-10T09:00:01.000Z",
+            "completedAt": "2026-08-10T09:05:00.000Z",
+            "orders": [{"_id": "o1"}],
+            "orderCount": 1,
+            "totalOrderCount": 1,
+        },
+        meta={"responseTime": "2ms"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_timeline("job-1")
+
+    assert "result" not in result.data
+    assert result.data["totalOrderCount"] == 1
+
+
+# -- 12. GET /health -------------------------------------------------------------
+
+
+def test_health_is_not_enveloped(make_client):
+    client, mock_request = make_client()
+    body = {"success": True, "status": "healthy", "version": "1.0.0", "timestamp": "2026-08-10T09:00:00.000Z"}
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.health()
+
+    assert result == body
+    assert result["status"] == "healthy"
+    method, url = mock_request.call_args.args
+    assert method == "GET"
+    assert url.endswith("/health")
+    headers = mock_request.call_args.kwargs["headers"]
+    assert "Authorization" not in headers
+    assert "X-API-Key" not in headers
