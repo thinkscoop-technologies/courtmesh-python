@@ -140,7 +140,6 @@ class CaseListItem(TypedDict, total=False):
     documentTypes: List[str]
     practiceAreas: List[str]
     precedentValue: str
-    s3Key: str
     createdAt: str
     updatedAt: str
 
@@ -452,9 +451,8 @@ class Order(TypedDict, total=False):
     judge: str
     petitioners: List[str]
     respondents: List[str]
+    # The API reports whether a document exists, never where it is stored.
     hasS3Key: bool
-    s3Key: str
-    s3Bucket: str
 
 
 class RequestTimelineResponse(TypedDict, total=False):
