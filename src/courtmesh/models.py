@@ -554,11 +554,26 @@ class ResponseTimeMeta(TypedDict, total=False):
 
 
 class HealthCheckResult(TypedDict, total=False):
-    """One dependency's result within `HealthResponse["checks"]` (`deep=True` only)."""
+    """One dependency's result within `HealthResponse["checks"]` (`deep=True` only).
+
+    Live-verified 2026-09-19: the deployed server actually sends each
+    `checks` entry as a bare status string (for example `"ok"`), never this
+    richer object - `latencyMs`/`error` were not observed on the wire. Kept
+    as the documented, richer shape a `checks` entry may still take (see
+    `HealthCheckEntry`), in case a future or different deployment sends it.
+    """
 
     status: str
     latencyMs: float
     error: str
+
+
+#: A `HealthResponse["checks"]` entry: live-verified 2026-09-19 to always be
+#: a bare status string in production (`"ok"` / `"degraded"` / `"down"`), not
+#: a `HealthCheckResult` object. Both shapes are accepted so this type never
+#: has to change again purely because the server started sending more detail
+#: per dependency.
+HealthCheckEntry = Union[str, HealthCheckResult]
 
 
 class HealthResponse(TypedDict, total=False):
@@ -568,17 +583,18 @@ class HealthResponse(TypedDict, total=False):
     `commit` is the deployed commit SHA, or `None` when the server has no
     `GIT_SHA` set. `checks` is present only when `deep=True` was passed to
     `health()`: one entry per dependency (Mongo, OpenSearch, Qdrant, Redis,
-    IAM). `status` is `"healthy"` on the plain form; the deep form's
-    `status` is one of `"healthy"`, `"degraded"` or `"unhealthy"` (the last
-    one only alongside HTTP 503, meaning a hard dependency - Mongo or
-    OpenSearch - is down).
+    IAM), each a bare status string in production - see `HealthCheckEntry`.
+    `status` is `"healthy"` on the plain form; the deep form's `status` is
+    one of `"healthy"`, `"degraded"` or `"unhealthy"` (the last one only
+    alongside HTTP 503, meaning a hard dependency - Mongo or OpenSearch - is
+    down).
     """
 
     success: bool
     status: str
     version: str
     commit: Optional[str]
-    checks: Dict[str, HealthCheckResult]
+    checks: Dict[str, HealthCheckEntry]
     timestamp: str
     requestId: str
 
@@ -737,11 +753,38 @@ class PartyScreenCoverage(TypedDict, total=False):
     someRecordsWithheld: bool
 
 
-class PartyScreenQueryEcho(TypedDict, total=False):
-    """The normalised request, echoed back for audit trails."""
+class PartyScreenRedactedName(TypedDict, total=False):
+    """Live-verified 2026-09-19: shape of `query["name"]` on a replayed
+    idempotent `party/screen` response, in place of the plain string sent on
+    the original call."""
 
-    name: str
-    aliases: List[str]
+    redacted: bool
+    length: int
+
+
+class PartyScreenRedactedAliases(TypedDict, total=False):
+    """Live-verified 2026-09-19: shape of `query["aliases"]` on a replayed
+    idempotent `party/screen` response, in place of the plain list sent on
+    the original call."""
+
+    redacted: bool
+    count: int
+
+
+class PartyScreenQueryEcho(TypedDict, total=False):
+    """The normalised request, echoed back for audit trails.
+
+    `name` and `aliases` are the plain values sent on the original call, but
+    live-verified 2026-09-19: when this is a replayed idempotent response
+    (`result.replayed is True`, `Idempotency-Replayed: true` on the wire),
+    the server redacts both instead of echoing them back - `name` becomes
+    `{"redacted": True, "length": ...}` and `aliases` becomes
+    `{"redacted": True, "count": ...}`. Check `"redacted" in query["name"]`
+    (or `result.replayed`) before treating either as the original value.
+    """
+
+    name: Union[str, PartyScreenRedactedName]
+    aliases: Union[List[str], PartyScreenRedactedAliases]
     entityType: str
     purpose: str
     #: The single court filter actually applied (never the raw request's
@@ -867,23 +910,33 @@ class UsageBalance(TypedDict, total=False):
 
 class UsageTierLimits(TypedDict, total=False):
     """Mirrors the server's `TierLimits` (server/config/api-tiers.ts).
-    `-1` means unlimited on any per period field."""
+    `-1` means unlimited on any per period field for a tier that has a
+    numbered cap.
+
+    Live-verified 2026-09-19 on an Enterprise key: every field below other
+    than `requestsPerMinute` came back `None`, not `-1` and not
+    `True`/`False` - this tier apparently has no configured cap at all for
+    those fields rather than an explicit "unlimited" sentinel. Every field
+    except `requestsPerMinute` is typed `Optional` to match; treat `None`
+    the same as `-1`/unlimited (or "allowed") unless you have evidence a
+    given tier distinguishes the two.
+    """
 
     requestsPerMinute: int
-    requestsPerDay: int
-    requestsPerMonth: int
-    maxPageSize: int
-    maxPaginationDepth: int
-    distinctCaseFetchesPerDay: int
-    pdfCallsPerMonth: int
-    aiCallsPerMonth: int
-    concurrentAnalyzeJobs: int
-    apiKeys: int
-    semanticSearchAllowed: bool
-    liveFetchAllowed: bool
-    liveFetchesPerDay: int
-    analysisReadAllowed: bool
-    partyScreensPerMonth: int
+    requestsPerDay: Optional[int]
+    requestsPerMonth: Optional[int]
+    maxPageSize: Optional[int]
+    maxPaginationDepth: Optional[int]
+    distinctCaseFetchesPerDay: Optional[int]
+    pdfCallsPerMonth: Optional[int]
+    aiCallsPerMonth: Optional[int]
+    concurrentAnalyzeJobs: Optional[int]
+    apiKeys: Optional[int]
+    semanticSearchAllowed: Optional[bool]
+    liveFetchAllowed: Optional[bool]
+    liveFetchesPerDay: Optional[int]
+    analysisReadAllowed: Optional[bool]
+    partyScreensPerMonth: Optional[int]
 
 
 class UsagePeriod(TypedDict, total=False):
@@ -916,6 +969,9 @@ class UsageData(TypedDict, total=False):
 
 class UsageMeta(TypedDict, total=False):
     requestId: str
+    #: Live-verified 2026-09-19, undocumented until now: whether this
+    #: account is on the API self-serve tiers flag.
+    selfServe: bool
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +1004,10 @@ class AuditHit(TypedDict, total=False):
     isAiAnalysis: bool
     creditsDeducted: int
     metadata: Dict[str, Any]
-    ipAddress: str
+    #: Live-verified 2026-09-19: the server sends `ipHash` (a SHA-256 hex
+    #: digest of the caller's IP), never `ipAddress` - the field this SDK
+    #: documented until now does not appear on the wire at all.
+    ipHash: str
     userAgent: str
     createdAt: str
 

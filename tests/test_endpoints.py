@@ -570,6 +570,49 @@ def test_screen_party_no_matches_omits_unset_optional_fields(make_client, envelo
     assert sent_body == {"name": "A Very Uncommon Name", "entityType": "person", "purpose": "kyc"}
 
 
+def test_screen_party_replayed_response_redacts_query_name_and_aliases(make_client, envelope):
+    """Live-verified 2026-09-19: replaying the same Idempotency-Key + body
+    returns query["name"] as {"redacted": True, "length": ...} and
+    query["aliases"] as {"redacted": True, "count": ...} instead of the
+    plain string/list sent on the original call - confirmed identically on
+    both SDKs against production."""
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "query": {
+                "name": {"redacted": True, "length": 8},
+                "aliases": {"redacted": True, "count": 0},
+                "entityType": "person",
+                "purpose": "research",
+                "limit": 10,
+                "adjudicate": False,
+                "displayThreshold": 0.6,
+            },
+            "summary": {"matchCount": 0, "byBand": {"confirmed": 0, "probable": 0, "possible": 0, "unlikely": 0}, "highestBand": None, "verdict": "no_matches_found"},
+            "matches": [],
+            "relatedButUnverified": [],
+            "coverage": {
+                "exhaustive": True,
+                "exhaustiveWithinFilters": True,
+                "planClamped": False,
+                "anyStrategyErrored": False,
+                "strategiesRun": ["exact"],
+                "someRecordsWithheld": False,
+            },
+            "adjudicationsRun": 0,
+            "notice": "Results are public court records.",
+        },
+        meta={"creditsCharged": 20, "adjudicated": False, "corpusAsOf": "2026-09-17"},
+    )
+    mock_request.return_value = FakeResponse(200, body, headers={"Idempotency-Replayed": "true"})
+
+    result = client.screen_party(name="Poojitha", entityType="person", purpose="research", idempotency_key="same-key")
+
+    assert result.replayed is True
+    name = result.data["query"]["name"]
+    assert isinstance(name, dict) and name["redacted"] is True and name["length"] == 8
+
+
 # -- 14. GET /coverage -------------------------------------------------------------
 
 
@@ -648,6 +691,50 @@ def test_get_usage_unwraps_tier_balance_and_by_endpoint(make_client, envelope):
     assert url.endswith("/usage")
 
 
+def test_get_usage_live_shape_null_limits_and_self_serve_meta(make_client, envelope):
+    """Live-verified 2026-09-19: an Enterprise key's limits came back None
+    (not -1, not True/False) for every field but requestsPerMinute, and meta
+    carried an undocumented selfServe flag."""
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "tier": "enterprise",
+            "walletOwner": {"type": "user", "id": "u1"},
+            "balance": {"total": 0, "monthlyGrant": 0, "signupGrant": 0, "purchased": 0},
+            "limits": {
+                "requestsPerMinute": 10,
+                "requestsPerDay": None,
+                "requestsPerMonth": None,
+                "maxPageSize": None,
+                "maxPaginationDepth": None,
+                "distinctCaseFetchesPerDay": None,
+                "pdfCallsPerMonth": None,
+                "aiCallsPerMonth": None,
+                "concurrentAnalyzeJobs": None,
+                "apiKeys": None,
+                "semanticSearchAllowed": None,
+                "liveFetchAllowed": None,
+                "liveFetchesPerDay": None,
+                "analysisReadAllowed": None,
+                "partyScreensPerMonth": None,
+            },
+            "period": {"start": "2026-08-31T18:30:00.000Z", "end": "2026-09-30T18:29:59.999Z", "key": "2026-09"},
+            "creditsUsedThisPeriod": 0,
+            "byEndpoint": [],
+            "subscriptionRenewsAt": None,
+        },
+        meta={"requestId": "req-usage-2", "selfServe": False},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_usage()
+
+    assert result.data["limits"]["requestsPerMinute"] == 10
+    assert result.data["limits"]["requestsPerDay"] is None
+    assert result.data["limits"]["semanticSearchAllowed"] is None
+    assert result.meta["selfServe"] is False
+
+
 # -- 16. GET /health?deep=1 ----------------------------------------------------
 
 
@@ -669,6 +756,26 @@ def test_health_deep_sends_deep_query_param(make_client):
     assert result["checks"]["opensearch"]["status"] == "degraded"
     params = mock_request.call_args.kwargs["params"]
     assert params == {"deep": "1"}
+
+
+def test_health_deep_live_shape_checks_are_bare_status_strings(make_client):
+    """Live-verified 2026-09-19: the deployed server sends checks as
+    {"mongo": "ok", ...}, never the richer {"status", "latencyMs", "error"}
+    object this SDK originally (and still optionally) documents."""
+    client, mock_request = make_client()
+    body = {
+        "success": True,
+        "status": "healthy",
+        "version": "1.2.0",
+        "checks": {"mongo": "ok", "opensearch": "ok", "qdrant": "ok", "redis": "ok", "iam": "ok"},
+        "timestamp": "2026-09-18T20:14:22.870Z",
+    }
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.health(deep=True)
+
+    assert result["checks"]["mongo"] == "ok"
+    assert result["checks"]["opensearch"] == "ok"
 
 
 def test_health_plain_sends_no_query_param(make_client):
@@ -725,6 +832,39 @@ def test_audit_sends_query_params_and_unwraps_hits(make_client):
     assert url.endswith("/audit")
     params = mock_request.call_args.kwargs["params"]
     assert params == {"userId": "u1", "limit": 50, "offset": 0}
+
+
+def test_audit_live_shape_hits_carry_ip_hash_never_ip_address(make_client):
+    """Live-verified 2026-09-19: every hit's IP field on the wire is ipHash
+    (a SHA-256 hex digest), not ipAddress - this SDK's AuditHit type
+    documented a field that has never actually appeared."""
+    client, mock_request = make_client()
+    body = {
+        "success": True,
+        "data": {
+            "hits": [
+                {
+                    "id": "h1",
+                    "endpoint": "/api/v1/prod/me",
+                    "method": "GET",
+                    "statusCode": 200,
+                    "responseTime": 2,
+                    "createdAt": "2026-09-18T00:00:00.000Z",
+                    "ipHash": "4173bdfd6267defad05aa48fdf5d69b0cb45293f2f7e5de9665b20a0df9f5e5f",
+                    "userAgent": "courtmesh-python/0.4.0",
+                }
+            ],
+            "summary": {"totalHits": 1, "totalAiAnalysisHits": 0, "avgResponseTime": 2, "successfulHits": 1, "successRate": "100.0", "totalCreditsDeducted": 0},
+            "topEndpoints": [{"endpoint": "/api/v1/prod/me", "count": 1}],
+        },
+        "pagination": {"total": 1, "limit": 50, "offset": 0, "hasMore": False},
+    }
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.audit()
+
+    assert result.data["hits"][0]["ipHash"] == "4173bdfd6267defad05aa48fdf5d69b0cb45293f2f7e5de9665b20a0df9f5e5f"
+    assert result.data["hits"][0]["userAgent"] == "courtmesh-python/0.4.0"
 
 
 # -- 19. GET /reference/courts --------------------------------------------------
