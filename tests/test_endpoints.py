@@ -640,7 +640,14 @@ def test_get_coverage_unwraps_snapshot_and_sends_api_key(make_client, envelope):
             ],
             "districtCourts": {"records": 300_000_000, "documentBearing": 1_000_000, "latestDecisionDate": "2026-09-16", "businessDaysBehind": 2},
         },
-        meta={"generatedAt": "2026-09-18T00:00:00.000Z", "cacheTtlSeconds": 21600, "corpusNote": "Counted 2026-09-18."},
+        meta={
+            "generatedAt": "2026-09-18T00:00:00.000Z",
+            "cacheTtlSeconds": 21600,
+            "snapshotAgeSeconds": 2145,
+            "cacheAgeSeconds": 712,
+            "stale": False,
+            "corpusNote": "Counted 2026-09-18.",
+        },
     )
     mock_request.return_value = FakeResponse(200, body)
 
@@ -649,6 +656,9 @@ def test_get_coverage_unwraps_snapshot_and_sends_api_key(make_client, envelope):
     assert result.data["total"] == 315_600_000
     assert result.data["districtCourts"]["records"] == 300_000_000
     assert result.meta["cacheTtlSeconds"] == 21600
+    assert result.meta["snapshotAgeSeconds"] == 2145
+    assert result.meta["cacheAgeSeconds"] == 712
+    assert result.meta["stale"] is False
 
     method, url = mock_request.call_args.args
     assert method == "GET"
@@ -670,7 +680,7 @@ def test_get_usage_unwraps_tier_balance_and_by_endpoint(make_client, envelope):
             "tier": "payg",
             "walletOwner": {"type": "user", "id": "u1"},
             "balance": {"total": 5000, "monthlyGrant": 0, "signupGrant": 1000, "purchased": 4000},
-            "limits": {"requestsPerMinute": 60, "partyScreensPerMonth": 100},
+            "limits": {"requestsPerMinute": 60, "partyScreensPerMonth": 100, "published": 60},
             "period": {"start": "2026-09-01T00:00:00.000Z", "end": "2026-09-30T18:29:59.999Z", "key": "2026-09"},
             "creditsUsedThisPeriod": 340,
             "byEndpoint": [{"endpoint": "/api/v1/prod/search/cases", "calls": 12, "credits": 12}],
@@ -692,9 +702,11 @@ def test_get_usage_unwraps_tier_balance_and_by_endpoint(make_client, envelope):
 
 
 def test_get_usage_live_shape_null_limits_and_self_serve_meta(make_client, envelope):
-    """Live-verified 2026-09-19: an Enterprise key's limits came back None
-    (not -1, not True/False) for every field but requestsPerMinute, and meta
-    carried an undocumented selfServe flag."""
+    """Live-verified 2026-09-19 against the redeployed server: `limits` is
+    always a populated object (never None itself). An Enterprise key's
+    limits came back None (not -1, not True/False) for every field but
+    requestsPerMinute and the new `published`, and meta carried an
+    undocumented selfServe flag."""
     client, mock_request = make_client()
     body = envelope(
         data={
@@ -717,6 +729,7 @@ def test_get_usage_live_shape_null_limits_and_self_serve_meta(make_client, envel
                 "liveFetchesPerDay": None,
                 "analysisReadAllowed": None,
                 "partyScreensPerMonth": None,
+                "published": 600,
             },
             "period": {"start": "2026-08-31T18:30:00.000Z", "end": "2026-09-30T18:29:59.999Z", "key": "2026-09"},
             "creditsUsedThisPeriod": 0,
@@ -732,6 +745,7 @@ def test_get_usage_live_shape_null_limits_and_self_serve_meta(make_client, envel
     assert result.data["limits"]["requestsPerMinute"] == 10
     assert result.data["limits"]["requestsPerDay"] is None
     assert result.data["limits"]["semanticSearchAllowed"] is None
+    assert result.data["limits"]["published"] == 600
     assert result.meta["selfServe"] is False
 
 
@@ -834,10 +848,12 @@ def test_audit_sends_query_params_and_unwraps_hits(make_client):
     assert params == {"userId": "u1", "limit": 50, "offset": 0}
 
 
-def test_audit_live_shape_hits_carry_ip_hash_never_ip_address(make_client):
-    """Live-verified 2026-09-19: every hit's IP field on the wire is ipHash
-    (a SHA-256 hex digest), not ipAddress - this SDK's AuditHit type
-    documented a field that has never actually appeared."""
+def test_audit_live_shape_hits_carry_ip_hash_never_ip_address_or_user_agent(make_client):
+    """Live-verified 2026-09-19 against the redeployed server and its
+    updated OpenAPI spec: every hit's IP field on the wire is ipHash (a
+    SHA-256 hex digest), never raw ipAddress; userAgent is no longer sent at
+    all as of this deploy (dropped for privacy alongside ipAddress).
+    metadata can also be sent as an explicit None, not only omitted."""
     client, mock_request = make_client()
     body = {
         "success": True,
@@ -850,8 +866,8 @@ def test_audit_live_shape_hits_carry_ip_hash_never_ip_address(make_client):
                     "statusCode": 200,
                     "responseTime": 2,
                     "createdAt": "2026-09-18T00:00:00.000Z",
+                    "metadata": None,
                     "ipHash": "4173bdfd6267defad05aa48fdf5d69b0cb45293f2f7e5de9665b20a0df9f5e5f",
-                    "userAgent": "courtmesh-python/0.4.0",
                 }
             ],
             "summary": {"totalHits": 1, "totalAiAnalysisHits": 0, "avgResponseTime": 2, "successfulHits": 1, "successRate": "100.0", "totalCreditsDeducted": 0},
@@ -864,7 +880,8 @@ def test_audit_live_shape_hits_carry_ip_hash_never_ip_address(make_client):
     result = client.audit()
 
     assert result.data["hits"][0]["ipHash"] == "4173bdfd6267defad05aa48fdf5d69b0cb45293f2f7e5de9665b20a0df9f5e5f"
-    assert result.data["hits"][0]["userAgent"] == "courtmesh-python/0.4.0"
+    assert result.data["hits"][0]["metadata"] is None
+    assert "userAgent" not in result.data["hits"][0]
 
 
 # -- 19. GET /reference/courts --------------------------------------------------

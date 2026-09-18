@@ -7,6 +7,64 @@ Each entry also states which server flags/behaviour the version targets on
 the CourtMesh research server, since some of this SDK's contract only takes
 effect once a given server flag is on for your account.
 
+## [0.4.1]
+
+Live QA pass against the redeployed production research server
+(`research.courtmesh.ai`, 2026-09-19) and its updated OpenAPI spec. All items
+below were confirmed with live calls against an Enterprise key, not only
+against the spec.
+
+### Added
+
+- `User-Agent: courtmesh-python/0.4.1` sent on every request.
+- `UsageTierLimits["published"]`: this tier's number in the OpenAPI
+  rate-limit table, distinct from `requestsPerMinute` (the number actually
+  enforced right now) until the API self-serve tiers flag is on for your
+  account, at which point the two converge.
+- `CoverageMeta["snapshotAgeSeconds"]`, `["cacheAgeSeconds"]` and
+  `["stale"]`, replacing a single `ageSeconds` field that never actually
+  existed on the wire.
+- `CoverageCourt["courtType"]`, now explicitly `Optional[str]` (added to the
+  live schema 2026-09-19).
+- `HealthCheckEntry`, `HealthCheckResult`, `PartyScreenRedactedName` and
+  `PartyScreenRedactedAliases` (carried forward from the interim QA branch,
+  re-verified live, see Changed below).
+
+### Changed
+
+- **Breaking:** `AuditHit["userAgent"]` removed - the redeployed server no
+  longer sends it at all (dropped for privacy alongside raw `ipAddress`,
+  which never appeared on the wire in the first place). `AuditHit["ipHash"]`
+  (a SHA-256 digest of the caller's IP) is retained; a same-day interim fix
+  had renamed `ipAddress` to `ipHash`, which remains correct.
+- **Breaking:** `UsageTierLimits`: every field but `requestsPerMinute` (and
+  now `published`) is `Optional`, matching a live Enterprise-key response
+  with the self-serve tiers flag off. `limits` itself is confirmed always a
+  populated dict, never `None`.
+- **Breaking:** `CoverageCourt`/`CoverageByCourtType`/`CoverageDistrictCourts`
+  date and `businessDaysBehind` fields are now `Optional`, matching the live
+  schema.
+- `AuditHit["metadata"]` is now `Optional[Dict[str, Any]]` - observed `None`
+  in production for hits with nothing to log, not only omitted.
+- `HealthResponse["checks"]` entries are bare status strings in production
+  (`"ok" | "fail" | "skipped"`), not `{"status", "latencyMs"?, "error"?}`
+  dicts; `HealthCheckEntry` accepts either shape (interim fix, re-verified
+  live).
+- `PartyScreenQueryEcho["name"]`/`["aliases"]` are redacted to
+  `{"redacted": True, "length": ...}`/`{"redacted": True, "count": ...}` on
+  a replayed idempotent `party/screen` response instead of echoing the
+  original string/list (interim fix, re-verified live via a same-key
+  replay).
+- Confirmed unchanged and correct: `caseNumber` is a string (never a number)
+  on every endpoint that returns one; the five idempotency-key-aware POST
+  endpoints (`screen_party`, `screen_party_batch`, `analyze_case`,
+  `analyze_consolidated`, `request_timeline`) still send `Idempotency-Key`
+  and mark a replay; the per-endpoint default timeouts are unchanged.
+
+### Removed
+
+- `AuditHit["userAgent"]` (see Changed above).
+
 ## [0.4.0]
 
 Targets the research server's account-introspection endpoints
