@@ -548,7 +548,7 @@ python -m pip install --upgrade build twine
 python -m build
 ```
 
-This produces `dist/courtmesh-0.3.0.tar.gz` and `dist/courtmesh-0.3.0-py3-none-any.whl`.
+This produces `dist/courtmesh-0.4.0.tar.gz` and `dist/courtmesh-0.4.0-py3-none-any.whl`.
 
 ### 3. Check the build
 

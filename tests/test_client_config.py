@@ -97,6 +97,29 @@ def test_health_endpoint_sends_no_auth_header_at_all(make_client):
     assert result["status"] == "healthy"
 
 
+def test_user_agent_identifies_the_sdk_and_version(make_client, envelope):
+    """A bare `requests.Session` sends `python-requests/<version>` by
+    default, which does not identify this SDK at all. The transport must
+    send its own `User-Agent` on every call, including the unauthenticated
+    `GET /health`."""
+    import re
+
+    from courtmesh import __version__
+
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(200, envelope(data=[]))
+    client.search_judges("x")
+    headers = mock_request.call_args.kwargs["headers"]
+    assert headers["User-Agent"] == "courtmesh-python/{}".format(__version__)
+    assert re.match(r"^courtmesh-python/\d+\.\d+\.\d+$", headers["User-Agent"])
+
+    mock_request.return_value = FakeResponse(
+        200, {"success": True, "status": "healthy", "version": "1.0.0", "timestamp": "2026-08-10T09:00:00.000Z"}
+    )
+    client.health()
+    assert mock_request.call_args.kwargs["headers"]["User-Agent"] == "courtmesh-python/{}".format(__version__)
+
+
 def test_custom_session_is_used_for_requests():
     session = requests.Session()
     mock_request = MagicMock()

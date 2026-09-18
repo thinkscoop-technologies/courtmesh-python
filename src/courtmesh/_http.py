@@ -13,7 +13,14 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from ._version import __version__
 from .errors import CourtMeshError, RateLimitError, build_error, is_retryable_429_code
+
+#: Sent as `User-Agent` on every request, overriding the generic
+#: `python-requests/<urllib3 version>` that a bare `requests.Session` would
+#: otherwise send, so the server (and anyone reading a request log) can tell
+#: this SDK, and which version, made the call.
+USER_AGENT = "courtmesh-python/{}".format(__version__)
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
@@ -126,7 +133,7 @@ class HTTPTransport:
                 given. Stable across every retry attempt of this same call.
         """
         url = "{}{}".format(self.base_url, path)
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
         if require_auth:
             headers.update(self._auth_headers())
         if idempotency_key:

@@ -8,6 +8,7 @@ Example:
         for hit in result.data:
             print(hit.get("title"))
 """
+from ._version import __version__
 from .client import CourtMesh, DEFAULT_BASE_URL
 from .errors import (
     API_REFUSAL_CODES,
@@ -105,8 +106,6 @@ from .models import (
     UsageTierLimits,
     UsageWalletOwner,
 )
-
-__version__ = "0.4.0"
 
 __all__ = [
     "CourtMesh",
