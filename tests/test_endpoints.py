@@ -453,3 +453,165 @@ def test_health_is_not_enveloped(make_client):
     headers = mock_request.call_args.kwargs["headers"]
     assert "Authorization" not in headers
     assert "X-API-Key" not in headers
+
+
+# -- 13. POST /party/screen -------------------------------------------------------
+
+
+def test_screen_party_sends_required_and_optional_fields(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "query": {"name": "Acme Textiles Pvt Ltd", "entityType": "company"},
+            "summary": {
+                "matchCount": 1,
+                "byBand": {"confirmed": 1, "probable": 0, "possible": 0, "unlikely": 0},
+                "highestBand": "confirmed",
+                "verdict": "matches_found",
+            },
+            "matches": [
+                {
+                    "caseId": "abc123",
+                    "title": "Acme Textiles Pvt Ltd v. State",
+                    "court": "Delhi High Court",
+                    "petitioners": ["Acme Textiles Pvt Ltd"],
+                    "respondents": ["State"],
+                    "partyRole": "petitioner",
+                    "confidence": {"band": "confirmed", "score": 0.94, "calibrated": 0.96, "engine": "deterministic"},
+                    "evidence": {
+                        "entityMatch": True,
+                        "matchedFields": ["name", "gstin"],
+                        "strategies": ["exact", "fuzzy"],
+                        "signals": [{"name": "gstin_match", "status": "matched", "weight": 0.6, "evidence": "07AAAAA0000A1Z5"}],
+                        "nameSimilarity": 0.98,
+                        "disambiguatorPresent": True,
+                    },
+                    "rationale": "GSTIN and name both match.",
+                    "casePageUrl": "https://research.courtmesh.ai/case/abc123",
+                }
+            ],
+            "relatedButUnverified": [],
+            "coverage": {
+                "exhaustive": True,
+                "exhaustiveWithinFilters": True,
+                "planClamped": False,
+                "anyStrategyErrored": False,
+                "strategiesRun": ["exact", "fuzzy"],
+                "someRecordsWithheld": False,
+                "candidatesEvaluated": 12,
+                "adjudicationsRun": 0,
+            },
+            "notice": "Results are public court records. See the case removal policy for takedown requests.",
+        },
+        meta={"creditsCharged": 100, "adjudicated": False, "corpusAsOf": "2026-09-17"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.screen_party(
+        name="Acme Textiles Pvt Ltd",
+        entityType="company",
+        purpose="due_diligence",
+        identifiers={"gstin": "07AAAAA0000A1Z5"},
+        address={"city": "Delhi", "state": "Delhi", "stateCode": "DL"},
+        limit=40,
+        adjudicate=True,
+    )
+
+    assert result.data["summary"]["verdict"] == "matches_found"
+    assert result.data["matches"][0]["confidence"]["band"] == "confirmed"
+    assert result.data["coverage"]["exhaustive"] is True
+    assert result.meta["creditsCharged"] == 100
+
+    method, url = mock_request.call_args.args
+    assert method == "POST"
+    assert url.endswith("/party/screen")
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body["name"] == "Acme Textiles Pvt Ltd"
+    assert sent_body["entityType"] == "company"
+    assert sent_body["purpose"] == "due_diligence"
+    assert sent_body["identifiers"] == {"gstin": "07AAAAA0000A1Z5"}
+    assert sent_body["adjudicate"] is True
+
+
+def test_screen_party_no_matches_omits_unset_optional_fields(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "query": {"name": "A Very Uncommon Name"},
+            "summary": {
+                "matchCount": 0,
+                "byBand": {"confirmed": 0, "probable": 0, "possible": 0, "unlikely": 0},
+                "highestBand": None,
+                "verdict": "no_matches_found",
+            },
+            "matches": [],
+            "relatedButUnverified": [],
+            "coverage": {
+                "exhaustive": True,
+                "exhaustiveWithinFilters": True,
+                "planClamped": False,
+                "anyStrategyErrored": False,
+                "strategiesRun": ["exact", "fuzzy"],
+                "someRecordsWithheld": False,
+                "candidatesEvaluated": 0,
+                "adjudicationsRun": 0,
+            },
+            "notice": "Results are public court records.",
+        },
+        meta={"creditsCharged": 20, "adjudicated": False, "corpusAsOf": "2026-09-17"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.screen_party(name="A Very Uncommon Name", entityType="person", purpose="kyc")
+
+    assert result.data["summary"]["verdict"] == "no_matches_found"
+    assert result.meta["creditsCharged"] == 20
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body == {"name": "A Very Uncommon Name", "entityType": "person", "purpose": "kyc"}
+
+
+# -- 14. GET /coverage -------------------------------------------------------------
+
+
+def test_get_coverage_unwraps_snapshot_and_sends_api_key(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "generatedAt": "2026-09-18T00:00:00.000Z",
+            "index": "courtmesh_cases_v3",
+            "total": 315_600_000,
+            "documentBearing": 12_000_000,
+            "statusOnly": 303_600_000,
+            "byCourtType": [{"courtType": "High Court", "records": 40_000_000, "documentBearing": 8_000_000, "latestDecisionDate": "2026-09-17"}],
+            "byYear": [{"year": 2026, "records": 1_200_000}],
+            "courts": [
+                {
+                    "court": "Delhi High Court",
+                    "courtType": "High Court",
+                    "records": 2_000_000,
+                    "documentBearing": 500_000,
+                    "earliestDecisionDate": "1950-01-01",
+                    "latestDecisionDate": "2026-09-17",
+                    "businessDaysBehind": 1,
+                }
+            ],
+            "districtCourts": {"records": 300_000_000, "documentBearing": 1_000_000, "latestDecisionDate": "2026-09-16", "businessDaysBehind": 2},
+        },
+        meta={"generatedAt": "2026-09-18T00:00:00.000Z", "cacheTtlSeconds": 21600, "corpusNote": "Counted 2026-09-18."},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_coverage()
+
+    assert result.data["total"] == 315_600_000
+    assert result.data["districtCourts"]["records"] == 300_000_000
+    assert result.meta["cacheTtlSeconds"] == 21600
+
+    method, url = mock_request.call_args.args
+    assert method == "GET"
+    assert url.endswith("/coverage")
+    headers = mock_request.call_args.kwargs["headers"]
+    # No API key is required by the server for this endpoint, but the
+    # client always has one (the constructor requires it) and sends it
+    # anyway.
+    assert headers.get("Authorization", "").startswith("Bearer ")

@@ -6,6 +6,7 @@ from courtmesh.errors import (
     AuthenticationError,
     BadGatewayError,
     CourtMeshError,
+    InsufficientCreditsError,
     NotFoundError,
     PermissionDeniedError,
     RateLimitError,
@@ -20,6 +21,7 @@ from helpers import FakeResponse
 STATUS_TO_CLASS = [
     (400, ValidationError),
     (401, AuthenticationError),
+    (402, InsufficientCreditsError),
     (403, PermissionDeniedError),
     (404, NotFoundError),
     (408, RequestTimeoutError),
@@ -104,6 +106,63 @@ def test_permission_denied_error_carries_plan_limit_body(make_client):
 
     assert excinfo.value.response_body["callsToday"] == 500
     assert excinfo.value.response_body["maxAllowed"] == 500
+
+
+def test_permission_denied_error_carries_tier_restriction_code(make_client):
+    client, mock_request = make_client(max_retries=0)
+    body = {
+        "success": False,
+        "error": "AI analysis is not available on the Free tier.",
+        "code": "API_TIER_NOT_ALLOWED",
+        "upgradeUrl": "https://courtmesh.ai/pricing",
+    }
+    mock_request.return_value = FakeResponse(403, body)
+
+    with pytest.raises(PermissionDeniedError) as excinfo:
+        client.analyze_case("1")
+
+    assert excinfo.value.response_body["code"] == "API_TIER_NOT_ALLOWED"
+    assert excinfo.value.response_body["upgradeUrl"] == "https://courtmesh.ai/pricing"
+
+
+def test_insufficient_credits_error_carries_required_balance_shortfall(make_client):
+    client, mock_request = make_client(max_retries=0)
+    body = {
+        "success": False,
+        "error": "Insufficient API credits for this call.",
+        "code": "INSUFFICIENT_API_CREDITS",
+        "required": 180,
+        "balance": 40,
+        "shortfall": 140,
+        "topUpUrl": "https://courtmesh.ai/pricing",
+    }
+    mock_request.return_value = FakeResponse(402, body)
+
+    with pytest.raises(InsufficientCreditsError) as excinfo:
+        client.screen_party(name="Acme Pvt Ltd", entityType="company", purpose="kyc", adjudicate=True)
+
+    assert excinfo.value.status_code == 402
+    assert excinfo.value.response_body["required"] == 180
+    assert excinfo.value.response_body["balance"] == 40
+    assert excinfo.value.response_body["shortfall"] == 140
+    assert excinfo.value.response_body["topUpUrl"] == "https://courtmesh.ai/pricing"
+
+
+def test_rate_limit_error_carries_distinct_names_limit_code(make_client):
+    client, mock_request = make_client(max_retries=0)
+    body = {
+        "success": False,
+        "error": "Distinct names per day limit reached for this plan.",
+        "code": "DISTINCT_NAMES_LIMIT_REACHED",
+        "retryAfter": 3600,
+    }
+    mock_request.return_value = FakeResponse(429, body)
+
+    with pytest.raises(RateLimitError) as excinfo:
+        client.screen_party(name="Acme Pvt Ltd", entityType="company", purpose="kyc")
+
+    assert excinfo.value.response_body["code"] == "DISTINCT_NAMES_LIMIT_REACHED"
+    assert excinfo.value.retry_after == 3600
 
 
 def test_request_timeout_error(make_client):

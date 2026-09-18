@@ -1,4 +1,4 @@
-"""CourtMesh Enterprise API Python SDK.
+"""CourtMesh API Python SDK.
 
 Example:
     from courtmesh import CourtMesh
@@ -10,16 +10,22 @@ Example:
 """
 from .client import CourtMesh, DEFAULT_BASE_URL
 from .errors import (
+    API_REFUSAL_CODES,
+    ApiRefusalCode,
     AuthenticationError,
     BadGatewayError,
     CourtMeshError,
+    InsufficientCreditsError,
     NotFoundError,
+    PayloadTooLargeError,
     PermissionDeniedError,
     RateLimitError,
     RequestTimeoutError,
     ServerError,
     ServiceUnavailableError,
     ValidationError,
+    build_error,
+    is_retryable_429_code,
 )
 from .models import (
     APIResponse,
@@ -34,10 +40,30 @@ from .models import (
     CitedCases,
     ConsolidatedAnalysis,
     ConsolidatedAnalyzeResponse,
+    CoverageByCourtType,
+    CoverageByYear,
+    CoverageCourt,
+    CoverageData,
+    CoverageDistrictCourts,
+    CoverageMeta,
     Envelope,
     HealthResponse,
     JudgeSearchMeta,
     Order,
+    PartyRole,
+    PartyScreenAddress,
+    PartyScreenByBand,
+    PartyScreenConfidence,
+    PartyScreenCoverage,
+    PartyScreenEvidence,
+    PartyScreenIdentifiers,
+    PartyScreenMatch,
+    PartyScreenMeta,
+    PartyScreenQueryEcho,
+    PartyScreenRelatedMatch,
+    PartyScreenResult,
+    PartyScreenSignal,
+    PartyScreenSummary,
     PdfResponse,
     RelatedDocument,
     RelatedResponse,
@@ -54,7 +80,7 @@ from .models import (
     TimelineJob,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "CourtMesh",
@@ -63,7 +89,9 @@ __all__ = [
     # errors
     "CourtMeshError",
     "ValidationError",
+    "PayloadTooLargeError",
     "AuthenticationError",
+    "InsufficientCreditsError",
     "PermissionDeniedError",
     "NotFoundError",
     "RequestTimeoutError",
@@ -71,6 +99,10 @@ __all__ = [
     "ServerError",
     "BadGatewayError",
     "ServiceUnavailableError",
+    "ApiRefusalCode",
+    "API_REFUSAL_CODES",
+    "is_retryable_429_code",
+    "build_error",
     # models
     "APIResponse",
     "Envelope",
@@ -102,4 +134,24 @@ __all__ = [
     "TimelineJob",
     "JudgeSearchMeta",
     "HealthResponse",
+    "PartyRole",
+    "PartyScreenIdentifiers",
+    "PartyScreenAddress",
+    "PartyScreenConfidence",
+    "PartyScreenSignal",
+    "PartyScreenEvidence",
+    "PartyScreenMatch",
+    "PartyScreenRelatedMatch",
+    "PartyScreenByBand",
+    "PartyScreenSummary",
+    "PartyScreenCoverage",
+    "PartyScreenQueryEcho",
+    "PartyScreenResult",
+    "PartyScreenMeta",
+    "CoverageByCourtType",
+    "CoverageByYear",
+    "CoverageCourt",
+    "CoverageDistrictCourts",
+    "CoverageData",
+    "CoverageMeta",
 ]

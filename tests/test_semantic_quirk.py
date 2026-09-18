@@ -1,7 +1,10 @@
-"""The semantic search transport quirk: the handler calls
+"""The semantic search transport quirk: the handler used to call
 `res.writeHead(200, ...)` before doing any real work, so failures after that
-point still arrive with HTTP 200 and `{"success": false, "error": "..."}`.
-The SDK must check `success` explicitly and raise."""
+point still arrived with HTTP 200 and `{"success": false, "error": "..."}`.
+The server sends a proper non-200 status for this today, so these fixtures
+exercise a defensive fallback that should never trigger against the live
+server, not documented current behaviour. The SDK still checks `success`
+explicitly and raises, as a belt-and-braces guard."""
 import pytest
 
 from courtmesh.errors import CourtMeshError

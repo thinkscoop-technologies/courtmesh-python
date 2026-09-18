@@ -82,6 +82,29 @@ def test_iter_search_cases_stops_on_empty_page(make_client, envelope):
     assert mock_request.call_count == 2
 
 
+def test_iter_search_cases_walks_pages_with_signed_cursor(make_client, envelope):
+    client, mock_request = make_client()
+    page1 = envelope(
+        data=[{"id": "1", "score": 1}],
+        meta={},
+        pagination={"total": 2, "hasMore": True, "limit": 1, "nextCursor": "signed.cursor.token"},
+    )
+    page2 = envelope(
+        data=[{"id": "2", "score": 1}],
+        meta={},
+        pagination={"total": 2, "hasMore": False, "limit": 1, "nextCursor": None},
+    )
+    mock_request.side_effect = [FakeResponse(200, page1), FakeResponse(200, page2)]
+
+    items = list(client.iter_search_cases("x", limit=1))
+
+    assert [item["id"] for item in items] == ["1", "2"]
+    assert mock_request.call_count == 2
+    second_body = mock_request.call_args_list[1].kwargs["json"]
+    assert second_body["cursor"] == "signed.cursor.token"
+    assert "page" not in second_body
+
+
 def test_iter_search_cases_max_pages_guards_against_runaway_has_more(make_client, envelope):
     client, mock_request = make_client()
     # A server bug that always reports hasMore=True would loop forever

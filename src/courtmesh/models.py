@@ -1,4 +1,4 @@
-"""Typed response models for the CourtMesh Enterprise API.
+"""Typed response models for the CourtMesh API.
 
 Every field here was taken directly from the API spec (which was itself
 derived from the server source). Nothing is invented. Most shapes use
@@ -15,6 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Generic, List, Optional, TypeVar, TypedDict, Union
 
+try:
+    from typing import Literal
+except ImportError:  # pragma: no cover - Python 3.7 fallback, unused at runtime
+    Literal = None  # type: ignore[assignment]
+
 T = TypeVar("T")
 
 
@@ -27,16 +32,20 @@ T = TypeVar("T")
 class SearchCasesPagination(TypedDict, total=False):
     """Pagination block returned by POST /search/cases.
 
-    `page` is absent when the caller used cursor pagination (`searchAfter`).
-    `totalPages` does not exist on this endpoint. `nextCursor` is an array
-    or None.
+    `page` is absent once cursor pagination has taken over. `totalPages`
+    does not exist on this endpoint. `nextCursor` has two shapes depending
+    on whether the API self-serve tiers flag is on for the account:
+    a signed, opaque string (pass it back as `cursor`) when it is on, or the
+    legacy raw OpenSearch sort tuple (an array, pass it back as a JSON
+    encoded `searchAfter` string) when it is off. Either way, `None` means
+    there is no next page.
     """
 
     total: int
     hasMore: bool
     page: int
     limit: int
-    nextCursor: Optional[List[Any]]
+    nextCursor: Union[str, List[Any], None]
 
 
 class SemanticSearchPagination(TypedDict, total=False):
@@ -98,7 +107,9 @@ class JudgeSearchMeta(TypedDict, total=False):
 
 
 class CaseListItem(TypedDict, total=False):
-    """One OpenSearch hit: `_source` fields plus `_id`, `_score`, `_sort`.
+    """One OpenSearch hit: `_source` fields plus `id`/`score` (the
+    documented contract names; `_id`/`_score` are the legacy field names,
+    kept for backwards compatibility).
 
     Every field is optional, presence varies per document. Note that
     `detailedSummary`, `holding`, `keyFacts_joined`, `legalIssues_joined`
@@ -106,6 +117,9 @@ class CaseListItem(TypedDict, total=False):
     never appear here.
     """
 
+    id: str
+    score: float
+    highlights: Dict[str, List[str]]
     _id: str
     _score: float
     _sort: List[Any]
@@ -159,6 +173,18 @@ class SearchCasesFilters(TypedDict, total=False):
 class SearchCasesMeta(TypedDict, total=False):
     query: str
     filters: SearchCasesFilters
+    #: The sort actually applied (after resolving a deprecated `sortBy`
+    #: alias like `"date"`): `"relevance"`, `"recent"` or `"oldest"`.
+    sortBy: str
+    #: Present, and truthy, only when at least one deprecated input was
+    #: silently resolved (for example `sortBy: "date"`).
+    warnings: List[str]
+    #: Present, and True, only when one or more results were withheld by
+    #: the restricted-case gate (a party's takedown, or a masked title).
+    someRecordsWithheld: bool
+    #: Present, and True, only when the restricted-case check itself could
+    #: not run (fail-closed masking, not a confirmed clean page).
+    restrictedCheckDegraded: bool
     responseTime: str
 
 
@@ -211,6 +237,12 @@ class SemanticSearchMeta(TypedDict, total=False):
     searchType: str
     message: str
     fallbackMode: str
+    #: Present, and True, only when one or more results were withheld by
+    #: the restricted-case gate (a party's takedown, or a masked title).
+    someRecordsWithheld: bool
+    #: Present, and True, only when the restricted-case check itself could
+    #: not run (fail-closed masking, not a confirmed clean page).
+    restrictedCheckDegraded: bool
 
 
 @dataclass
@@ -456,12 +488,21 @@ class Order(TypedDict, total=False):
 
 
 class RequestTimelineResponse(TypedDict, total=False):
+    """Body of POST /request-timeline. `result.meta["liveFetch"]` (a plain
+    bool, not modeled as its own TypedDict since `APIResponse.meta` is
+    untyped) says whether this call actually reached a live source or
+    served a stored read, regardless of whether `refresh` was requested.
+    """
+
     requestId: str
     status: str
     cached: bool
     message: str
     orderCount: int
     orders: List[Order]
+    #: Present, and False, only when this case's court does not support a
+    #: live refresh at all (`refresh` is then a no-op regardless of tier).
+    liveFetchSupported: bool
 
 
 class TimelineJob(TypedDict, total=False):
@@ -500,3 +541,262 @@ class HealthResponse(TypedDict, total=False):
     status: str
     version: str
     timestamp: str
+
+
+# ---------------------------------------------------------------------------
+# 13. POST /party/screen
+# ---------------------------------------------------------------------------
+
+
+class PartyScreenIdentifiers(TypedDict, total=False):
+    pan: str
+    gstin: str
+    cin: str
+    llpin: str
+
+
+class PartyScreenAddress(TypedDict, total=False):
+    city: str
+    state: str
+    stateCode: str
+
+
+if Literal is not None:
+    PartyRole = Literal["petitioner", "respondent", "unknown"]
+else:  # pragma: no cover
+    PartyRole = str  # type: ignore[assignment,misc]
+
+
+class PartyScreenConfidence(TypedDict, total=False):
+    """`band` is one of `confirmed`, `probable`, `possible`, `unlikely`.
+    `engine` is `"rules"` for the deterministic resolver, or `"llm"` when
+    `adjudicate=True` triggered adjudication for this candidate (or the LLM
+    path degraded and fell back to rules).
+    """
+
+    band: str
+    #: Alias of `calibrated`, kept as a stable top-level "the number" field.
+    score: float
+    calibrated: float
+    engine: str
+
+
+class PartyScreenSignal(TypedDict, total=False):
+    """`status` is one of `matched`, `conflicted`, `absent`. `weight` is one
+    of `strong`, `moderate`, `weak`. `evidence` is the exact input token(s)
+    the signal is grounded in, absent when there is nothing to cite.
+    """
+
+    name: str
+    status: str
+    weight: str
+    evidence: str
+
+
+class PartyScreenEvidence(TypedDict, total=False):
+    entityMatch: bool
+    matchedFields: List[str]
+    strategies: List[str]
+    signals: List[PartyScreenSignal]
+    nameSimilarity: float
+    disambiguatorPresent: bool
+
+
+class PartyScreenMatch(TypedDict, total=False):
+    """One confirmed or scored match. Items in `relatedButUnverified` are
+    the same plain-case fields (`caseId` through `casePageUrl`) but never
+    carry `partyRole`, `confidence`, `evidence` or `rationale` - see
+    `PartyScreenRelatedMatch`.
+    """
+
+    caseId: str
+    title: str
+    court: str
+    caseNumber: str
+    cnr: str
+    caseType: str
+    acts: List[str]
+    sections: List[str]
+    petitioners: List[str]
+    respondents: List[str]
+    filingDate: str
+    decisionDate: str
+    disposalNature: str
+    citation: str
+    summary: str
+    casePageUrl: str
+    partyRole: str
+    confidence: PartyScreenConfidence
+    evidence: PartyScreenEvidence
+    rationale: str
+
+
+class PartyScreenRelatedMatch(TypedDict, total=False):
+    """The plain case fields only: everything on `PartyScreenMatch` except
+    `partyRole`, `confidence`, `evidence` and `rationale`. A candidate the
+    screen found but could not confidently confirm, below `displayThreshold`
+    or withheld from full confidence scoring for another reason.
+    """
+
+    caseId: str
+    title: str
+    court: str
+    caseNumber: str
+    cnr: str
+    caseType: str
+    acts: List[str]
+    sections: List[str]
+    petitioners: List[str]
+    respondents: List[str]
+    filingDate: str
+    decisionDate: str
+    disposalNature: str
+    citation: str
+    summary: str
+    casePageUrl: str
+
+
+class PartyScreenByBand(TypedDict, total=False):
+    confirmed: int
+    probable: int
+    possible: int
+    unlikely: int
+
+
+class PartyScreenSummary(TypedDict, total=False):
+    """`verdict` is one of `matches_found`, `no_matches_found`,
+    `inconclusive`. `matches_found` describes what was found internally,
+    independent of `displayThreshold` - raising the threshold can leave
+    `matches` empty (`matchCount == 0`) while the verdict is still
+    `matches_found`. `since` on the request forces `inconclusive` (it is a
+    best-effort filter, so completeness can never be certified either way).
+    `no_matches_found` is only returned when `coverage["exhaustive"]` is
+    True and nothing was withheld.
+    """
+
+    matchCount: int
+    byBand: PartyScreenByBand
+    highestBand: Optional[str]
+    verdict: str
+
+
+class PartyScreenCoverage(TypedDict, total=False):
+    """Whether this screen exhaustively searched the corpus, and whether
+    any plan limit or restricted case removed candidates from the result.
+
+    Exactly these six fields, no more: `candidatesEvaluated` and
+    `adjudicationsRun` are not part of this object (`adjudicationsRun` is a
+    top level field of `PartyScreenResult` instead, see below).
+    """
+
+    exhaustive: bool
+    exhaustiveWithinFilters: bool
+    planClamped: bool
+    anyStrategyErrored: bool
+    strategiesRun: List[str]
+    someRecordsWithheld: bool
+
+
+class PartyScreenQueryEcho(TypedDict, total=False):
+    """The normalised request, echoed back for audit trails."""
+
+    name: str
+    aliases: List[str]
+    entityType: str
+    purpose: str
+    #: The single court filter actually applied (never the raw request's
+    #: string-or-list shape), absent when none was supplied.
+    court: str
+    since: str
+    limit: int
+    adjudicate: bool
+    displayThreshold: float
+
+
+class PartyScreenResult(TypedDict, total=False):
+    """Body of POST /party/screen. `query` echoes the normalised request
+    for audit trails. `notice` links the case removal / takedown policy.
+
+    `adjudicationsRun`: how many candidates were actually sent to the LLM
+    for adjudication. Requesting `adjudicate=True` alone does not guarantee
+    this is greater than 0 - every candidate may already have been decided
+    deterministically, in which case the model is never called and this
+    stays 0, which is also why the adjudication credit surcharge is billed
+    on this being greater than 0, not on the request flag alone.
+    """
+
+    query: PartyScreenQueryEcho
+    summary: PartyScreenSummary
+    matches: List[PartyScreenMatch]
+    relatedButUnverified: List[PartyScreenRelatedMatch]
+    coverage: PartyScreenCoverage
+    adjudicationsRun: int
+    notice: str
+
+
+class PartyScreenMeta(TypedDict, total=False):
+    """100 credits when matches are found, 20 when none are, plus a flat
+    surcharge only when the result's `adjudicationsRun` is greater than 0
+    (see `PartyScreenResult`).
+    """
+
+    creditsCharged: int
+    adjudicated: bool
+    corpusAsOf: str
+
+
+# ---------------------------------------------------------------------------
+# 14. GET /coverage
+# ---------------------------------------------------------------------------
+
+
+class CoverageByCourtType(TypedDict, total=False):
+    courtType: str
+    records: int
+    documentBearing: int
+    latestDecisionDate: str
+
+
+class CoverageByYear(TypedDict, total=False):
+    year: int
+    records: int
+
+
+class CoverageCourt(TypedDict, total=False):
+    court: str
+    courtType: str
+    records: int
+    documentBearing: int
+    earliestDecisionDate: str
+    latestDecisionDate: str
+    businessDaysBehind: int
+
+
+class CoverageDistrictCourts(TypedDict, total=False):
+    """District Courts are reported as a single rolled up row, the index
+    has no per-state field."""
+
+    records: int
+    documentBearing: int
+    latestDecisionDate: str
+    businessDaysBehind: int
+
+
+class CoverageData(TypedDict, total=False):
+    """Body of GET /coverage."""
+
+    generatedAt: str
+    index: str
+    total: int
+    documentBearing: int
+    statusOnly: int
+    byCourtType: List[CoverageByCourtType]
+    byYear: List[CoverageByYear]
+    courts: List[CoverageCourt]
+    districtCourts: CoverageDistrictCourts
+
+
+class CoverageMeta(TypedDict, total=False):
+    generatedAt: str
+    cacheTtlSeconds: int
+    corpusNote: str
