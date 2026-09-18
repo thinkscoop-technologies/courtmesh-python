@@ -84,10 +84,26 @@ class Envelope(TypedDict, total=False):
 
 @dataclass
 class APIResponse(Generic[T]):
-    """Convenience wrapper for non-paginated endpoints: unwrapped data + meta."""
+    """Convenience wrapper for non-paginated endpoints: unwrapped data + meta.
+
+    Attributes:
+        request_id: the request id for this call, either the server's own
+            `meta["requestId"]`/body level `requestId` when it set one, or
+            (backfilled client side as a fallback) the `X-Request-Id`
+            response header.
+        replayed: `True` only when this call sent an `idempotency_key` that
+            matched a previous request within its 24 hour window: the
+            server returned the stored response instead of doing the work
+            again, and nothing was charged. Only ever set on the five
+            idempotency-key-aware methods (`screen_party`,
+            `screen_party_batch`, `analyze_case`, `analyze_consolidated`,
+            `request_timeline`); `None` on every other response.
+    """
 
     data: T
     meta: Dict[str, Any]
+    request_id: Optional[str] = None
+    replayed: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +211,8 @@ class SearchCasesResult:
     data: List[CaseListItem]
     meta: SearchCasesMeta
     pagination: SearchCasesPagination
+    #: See `APIResponse.request_id`.
+    request_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +275,8 @@ class SemanticSearchResult:
     data: List[Union[SemanticSearchResultItem, CaseListItem]]
     meta: SemanticSearchMeta
     pagination: SemanticSearchPagination
+    #: See `APIResponse.request_id`.
+    request_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -533,14 +553,34 @@ class ResponseTimeMeta(TypedDict, total=False):
 # ---------------------------------------------------------------------------
 
 
+class HealthCheckResult(TypedDict, total=False):
+    """One dependency's result within `HealthResponse["checks"]` (`deep=True` only)."""
+
+    status: str
+    latencyMs: float
+    error: str
+
+
 class HealthResponse(TypedDict, total=False):
     """Body of GET /health. Not enveloped in `data`, unlike every other
-    endpoint."""
+    endpoint.
+
+    `commit` is the deployed commit SHA, or `None` when the server has no
+    `GIT_SHA` set. `checks` is present only when `deep=True` was passed to
+    `health()`: one entry per dependency (Mongo, OpenSearch, Qdrant, Redis,
+    IAM). `status` is `"healthy"` on the plain form; the deep form's
+    `status` is one of `"healthy"`, `"degraded"` or `"unhealthy"` (the last
+    one only alongside HTTP 503, meaning a hard dependency - Mongo or
+    OpenSearch - is down).
+    """
 
     success: bool
     status: str
     version: str
+    commit: Optional[str]
+    checks: Dict[str, HealthCheckResult]
     timestamp: str
+    requestId: str
 
 
 # ---------------------------------------------------------------------------
@@ -800,3 +840,240 @@ class CoverageMeta(TypedDict, total=False):
     generatedAt: str
     cacheTtlSeconds: int
     corpusNote: str
+
+
+# ---------------------------------------------------------------------------
+# 15. GET /usage
+# ---------------------------------------------------------------------------
+
+
+if Literal is not None:
+    ApiTier = Literal["free", "payg", "scale", "enterprise"]
+else:  # pragma: no cover
+    ApiTier = str  # type: ignore[assignment,misc]
+
+
+class UsageWalletOwner(TypedDict, total=False):
+    type: str
+    id: str
+
+
+class UsageBalance(TypedDict, total=False):
+    total: int
+    monthlyGrant: int
+    signupGrant: int
+    purchased: int
+
+
+class UsageTierLimits(TypedDict, total=False):
+    """Mirrors the server's `TierLimits` (server/config/api-tiers.ts).
+    `-1` means unlimited on any per period field."""
+
+    requestsPerMinute: int
+    requestsPerDay: int
+    requestsPerMonth: int
+    maxPageSize: int
+    maxPaginationDepth: int
+    distinctCaseFetchesPerDay: int
+    pdfCallsPerMonth: int
+    aiCallsPerMonth: int
+    concurrentAnalyzeJobs: int
+    apiKeys: int
+    semanticSearchAllowed: bool
+    liveFetchAllowed: bool
+    liveFetchesPerDay: int
+    analysisReadAllowed: bool
+    partyScreensPerMonth: int
+
+
+class UsagePeriod(TypedDict, total=False):
+    """The [start, end] ISO timestamps of the Asia/Kolkata calendar month
+    this usage was aggregated over."""
+
+    start: str
+    end: str
+    key: str
+
+
+class UsageByEndpoint(TypedDict, total=False):
+    endpoint: str
+    calls: int
+    credits: int
+
+
+class UsageData(TypedDict, total=False):
+    """Body of GET /usage."""
+
+    tier: str
+    walletOwner: UsageWalletOwner
+    balance: UsageBalance
+    limits: UsageTierLimits
+    period: UsagePeriod
+    creditsUsedThisPeriod: int
+    byEndpoint: List[UsageByEndpoint]
+    subscriptionRenewsAt: Optional[str]
+
+
+class UsageMeta(TypedDict, total=False):
+    requestId: str
+
+
+# ---------------------------------------------------------------------------
+# 16. GET /me
+# ---------------------------------------------------------------------------
+
+
+class MeData(TypedDict, total=False):
+    userId: str
+    email: str
+    name: Optional[str]
+    role: Optional[str]
+    #: Only present when the account belongs to an organization.
+    organizationId: str
+
+
+# ---------------------------------------------------------------------------
+# 17. GET /audit
+# ---------------------------------------------------------------------------
+
+
+class AuditHit(TypedDict, total=False):
+    id: str
+    userId: str
+    organizationId: str
+    endpoint: str
+    method: str
+    statusCode: int
+    responseTime: float
+    isAiAnalysis: bool
+    creditsDeducted: int
+    metadata: Dict[str, Any]
+    ipAddress: str
+    userAgent: str
+    createdAt: str
+
+
+class AuditTopEndpoint(TypedDict, total=False):
+    endpoint: str
+    count: int
+
+
+class AuditSummary(TypedDict, total=False):
+    totalHits: int
+    totalAiAnalysisHits: int
+    avgResponseTime: float
+    successfulHits: int
+    #: A string, e.g. `"98.5"` - the server formats it with `toFixed(1)`.
+    successRate: str
+    totalCreditsDeducted: int
+
+
+class AuditData(TypedDict, total=False):
+    hits: List[AuditHit]
+    summary: AuditSummary
+    topEndpoints: List[AuditTopEndpoint]
+
+
+class AuditPagination(TypedDict, total=False):
+    total: int
+    limit: int
+    offset: int
+    hasMore: bool
+
+
+@dataclass
+class AuditResult:
+    """Result of `audit`. `GET /audit` nests its own pagination shape under
+    the envelope, distinct from `SearchCasesPagination`/`SemanticSearchPagination`.
+    """
+
+    data: AuditData
+    pagination: AuditPagination
+    request_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# 18. GET /reference/courts
+# ---------------------------------------------------------------------------
+
+#: court/courtType -> display name(s).
+CourtNamesMap = Dict[str, List[str]]
+
+
+class CourtHierarchy(TypedDict, total=False):
+    #: The 4 court types (level 1).
+    courtTypes: List[str]
+    #: courtType -> court values (level 2). High Court is collapsed to representatives.
+    courtsByType: CourtNamesMap
+    #: court -> courtName values (level 3). Includes an entry per High Court representative.
+    courtNamesByCourt: CourtNamesMap
+
+
+# ---------------------------------------------------------------------------
+# 19. GET /reference/case-types
+# ---------------------------------------------------------------------------
+
+
+class CaseTypeEntry(TypedDict, total=False):
+    code: str
+    fullForm: str
+    primaryType: str
+    nature: str
+
+
+# ---------------------------------------------------------------------------
+# 20. POST /party/screen/batch
+# ---------------------------------------------------------------------------
+
+
+class PartyScreenBatchItemOk(TypedDict, total=False):
+    clientRef: str
+    #: The item's 0 based position in the request's `items` array.
+    index: int
+    ok: bool
+    screen: PartyScreenResult
+
+
+class PartyScreenBatchError(TypedDict, total=False):
+    code: str
+    message: str
+
+
+class PartyScreenBatchItemResult(TypedDict, total=False):
+    """One entry of `data["results"]`. `ok` discriminates between the
+    success shape (`screen` present) and the failure shape (`error`
+    present).
+    """
+
+    clientRef: str
+    index: int
+    ok: bool
+    screen: PartyScreenResult
+    error: PartyScreenBatchError
+
+
+class PartyScreenBatchSummary(TypedDict, total=False):
+    items: int
+    matchesFound: int
+    noMatches: int
+    inconclusive: int
+    errors: int
+
+
+class PartyScreenBatchResult(TypedDict, total=False):
+    """Body of POST /party/screen/batch."""
+
+    results: List[PartyScreenBatchItemResult]
+    summary: PartyScreenBatchSummary
+
+
+class PartyScreenBatchMeta(TypedDict, total=False):
+    """`creditsCharged` is the sum across every item that ran (a per-item
+    error charges nothing for that item). `truncated`/`truncatedReason` are
+    present only when the batch itself was clamped.
+    """
+
+    creditsCharged: int
+    requestId: str
+    truncated: bool
+    truncatedReason: str

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import uuid
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 from urllib.parse import quote
 
@@ -13,11 +14,17 @@ from .errors import CourtMeshError
 from .models import (
     APIResponse,
     AnalyzeResponse,
+    AuditData,
+    AuditResult,
     CaseAnalysisResponse,
     CaseDetails,
+    CaseTypeEntry,
     ConsolidatedAnalyzeResponse,
+    CourtHierarchy,
     CoverageData,
     HealthResponse,
+    MeData,
+    PartyScreenBatchResult,
     PartyScreenResult,
     PdfResponse,
     RelatedResponse,
@@ -25,6 +32,7 @@ from .models import (
     SearchCasesResult,
     SemanticSearchResult,
     TimelineJob,
+    UsageData,
 )
 
 DEFAULT_BASE_URL = "https://research.courtmesh.ai/api/v1/prod"
@@ -49,6 +57,12 @@ def _set_if_present(payload: Dict[str, Any], **fields: Any) -> None:
     for key, value in fields.items():
         if value is not None:
             payload[key] = value
+
+
+def _generate_idempotency_key() -> str:
+    """A random UUID v4, used to auto-generate an `Idempotency-Key` when a
+    caller has opted into `retry_posts` but did not supply their own key."""
+    return str(uuid.uuid4())
 
 
 class CourtMesh:
@@ -157,6 +171,20 @@ class CourtMesh:
         """The underlying `requests.Session`, for advanced customisation."""
         return self._transport.session
 
+    def _resolve_idempotency_key(
+        self, idempotency_key: Optional[str], retry_posts: Optional[bool]
+    ) -> Optional[str]:
+        """Resolves the `Idempotency-Key` to send for one of the five
+        idempotency-aware POST methods: the caller's own explicit key, else
+        an auto-generated UUID v4 when `retry_posts` is in effect for this
+        call (the per-call override, falling back to the client's own
+        default), else `None` (no header sent).
+        """
+        if idempotency_key:
+            return idempotency_key
+        effective_retry_posts = self._transport.retry_posts if retry_posts is None else retry_posts
+        return _generate_idempotency_key() if effective_retry_posts else None
+
     # -- 1. GET /judges/search -------------------------------------------
 
     def search_judges(self, q: str = "", timeout: Optional[float] = None) -> APIResponse[List[str]]:
@@ -174,7 +202,7 @@ class CourtMesh:
             params["q"] = q
         response = self._transport.request("GET", "/judges/search", params=params or None, timeout=timeout)
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", []), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", []), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 2. POST /search/cases --------------------------------------------
 
@@ -260,6 +288,7 @@ class CourtMesh:
             data=body.get("data", []),
             meta=body.get("meta", {}),
             pagination=body.get("pagination", {}),
+            request_id=body.get("requestId"),
         )
 
     def iter_search_cases(
@@ -435,6 +464,7 @@ class CourtMesh:
             data=body.get("data", []),
             meta=body.get("meta", {}),
             pagination=body.get("pagination", {}),
+            request_id=body.get("requestId"),
         )
 
     def iter_semantic_search(
@@ -482,7 +512,7 @@ class CourtMesh:
         path = "/cases/{}".format(quote(str(case_id), safe=""))
         response = self._transport.request("GET", path, timeout=timeout)
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 5. GET /cases/{id}/analysis ----------------------------------------
 
@@ -496,7 +526,7 @@ class CourtMesh:
         path = "/cases/{}/analysis".format(quote(str(case_id), safe=""))
         response = self._transport.request("GET", path, timeout=timeout)
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 6. GET /cases/{id}/related -----------------------------------------
 
@@ -510,7 +540,7 @@ class CourtMesh:
         path = "/cases/{}/related".format(quote(str(case_id), safe=""))
         response = self._transport.request("GET", path, timeout=timeout)
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 7. GET /cases/{id}/pdf ----------------------------------------------
 
@@ -529,7 +559,7 @@ class CourtMesh:
         path = "/cases/{}/pdf".format(quote(str(case_id), safe=""))
         response = self._transport.request("GET", path, timeout=timeout)
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 8. POST /cases/{id}/analyze ------------------------------------------
 
@@ -540,6 +570,7 @@ class CourtMesh:
         allow_remote_fetch: bool = False,
         timeout: Optional[float] = None,
         retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
     ) -> APIResponse[AnalyzeResponse]:
         """Start AI analysis for a case. Asynchronous.
 
@@ -560,16 +591,32 @@ class CourtMesh:
                 `code == "REMOTE_FETCH_NOT_ALLOWED"` either way). Adds a
                 credit surcharge on top of the base analyze price, charged
                 once at admission.
+            idempotency_key: sent as the `Idempotency-Key` header (1 to 128
+                characters, `[A-Za-z0-9_.-]`, scoped per API key for 24
+                hours). A replayed call with the same key and the same body
+                returns the stored response again (`result.replayed`
+                becomes `True`, no new charge); the same key with a
+                different body raises `ConflictError` with
+                `code == "IDEMPOTENCY_KEY_REUSED"`. When omitted, and
+                `retry_posts` (this call's override, or the client's own
+                default) is in effect, a random UUID v4 is generated for
+                you, so an automatic retry of this exact call is always
+                safe from a double charge or a double-run job.
         """
         path = "/cases/{}/analyze".format(quote(str(case_id), safe=""))
         payload: Dict[str, Any] = {"force": force}
         if allow_remote_fetch:
             payload["allowRemoteFetch"] = True
         response = self._transport.request(
-            "POST", path, json_body=payload, timeout=timeout, retry_posts=retry_posts
+            "POST",
+            path,
+            json_body=payload,
+            timeout=timeout,
+            retry_posts=retry_posts,
+            idempotency_key=self._resolve_idempotency_key(idempotency_key, retry_posts),
         )
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 9. POST /cases/{id}/analyze-consolidated -----------------------------
 
@@ -579,6 +626,7 @@ class CourtMesh:
         force: bool = False,
         timeout: Optional[float] = None,
         retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
     ) -> APIResponse[ConsolidatedAnalyzeResponse]:
         """Run consolidated AI analysis. Synchronous and slow (up to 300s
         by default, see `timeout`).
@@ -591,6 +639,7 @@ class CourtMesh:
         Args:
             force: re-run even if a consolidated analysis already exists.
             timeout: per call timeout override, in seconds. Defaults to 300.
+            idempotency_key: see `analyze_case`.
         """
         path = "/cases/{}/analyze-consolidated".format(quote(str(case_id), safe=""))
         response = self._transport.request(
@@ -599,9 +648,10 @@ class CourtMesh:
             json_body={"force": force},
             timeout=_ANALYZE_CONSOLIDATED_TIMEOUT if timeout is None else timeout,
             retry_posts=retry_posts,
+            idempotency_key=self._resolve_idempotency_key(idempotency_key, retry_posts),
         )
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 10. POST /request-timeline --------------------------------------------
 
@@ -611,6 +661,7 @@ class CourtMesh:
         refresh: bool = False,
         timeout: Optional[float] = None,
         retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
     ) -> APIResponse[RequestTimelineResponse]:
         """Request the orders timeline for a case. `case_id` must be a Mongo
         ObjectId string, it is passed straight to `new ObjectId()` server side.
@@ -633,6 +684,7 @@ class CourtMesh:
                 `result.data["liveFetchSupported"]` comes back `False` when
                 this case's court does not support a live refresh at all.
             timeout: per call timeout override, in seconds. Defaults to 240.
+            idempotency_key: see `analyze_case`.
         """
         payload: Dict[str, Any] = {"case_id": case_id}
         if refresh:
@@ -643,9 +695,10 @@ class CourtMesh:
             json_body=payload,
             timeout=_REQUEST_TIMELINE_TIMEOUT if timeout is None else timeout,
             retry_posts=retry_posts,
+            idempotency_key=self._resolve_idempotency_key(idempotency_key, retry_posts),
         )
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 11. GET /get-timeline/{requestId} --------------------------------------
 
@@ -658,17 +711,26 @@ class CourtMesh:
         path = "/get-timeline/{}".format(quote(str(request_id), safe=""))
         response = self._transport.request("GET", path, timeout=timeout)
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 12. GET /health ----------------------------------------------------
 
-    def health(self, timeout: Optional[float] = None) -> HealthResponse:
-        """Check API health. No auth required, not rate limited.
+    def health(self, deep: bool = False, timeout: Optional[float] = None) -> HealthResponse:
+        """Check API health. No auth required, not rate limited beyond the
+        public health limiter.
+
+        The plain form (`deep=False`, default) is a cheap liveness probe: no
+        dependency calls, always fast, always HTTP 200 while the process is
+        up. Pass `deep=True` to also check Mongo, OpenSearch, Qdrant, Redis
+        and IAM standing (each bounded to 1s) - `status` then also reports
+        `"degraded"`, and HTTP 503 (`status == "unhealthy"`) when a hard
+        dependency (Mongo or OpenSearch) is down.
 
         Unlike every other endpoint, the response is not enveloped in
         `data`, this method returns the body directly.
         """
-        response = self._transport.request("GET", "/health", require_auth=False, timeout=timeout)
+        params = {"deep": "1"} if deep else None
+        response = self._transport.request("GET", "/health", params=params, require_auth=False, timeout=timeout)
         body = self._transport.parse_envelope(response)
         return body
 
@@ -690,6 +752,7 @@ class CourtMesh:
         displayThreshold: Optional[float] = None,
         timeout: Optional[float] = None,
         retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
     ) -> APIResponse[PartyScreenResult]:
         """Screen a person or company name against the case law corpus for
         litigation, insolvency and related court records. Requires an API
@@ -737,6 +800,7 @@ class CourtMesh:
                 required for a candidate to appear in `data["matches"]`
                 rather than `data["relatedButUnverified"]`.
             timeout: per call timeout override, in seconds. Defaults to 90.
+            idempotency_key: see `analyze_case`.
 
         Returns:
             `result.data["summary"]["verdict"]` is one of `"matches_found"`
@@ -772,9 +836,10 @@ class CourtMesh:
             json_body=payload,
             timeout=_SCREEN_PARTY_TIMEOUT if timeout is None else timeout,
             retry_posts=retry_posts,
+            idempotency_key=self._resolve_idempotency_key(idempotency_key, retry_posts),
         )
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
     # -- 14. GET /coverage ----------------------------------------------------
 
@@ -791,4 +856,143 @@ class CourtMesh:
         """
         response = self._transport.request("GET", "/coverage", timeout=timeout)
         body = self._transport.parse_envelope(response)
-        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}))
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
+
+    # -- 15. GET /usage ---------------------------------------------------------
+
+    def get_usage(self, timeout: Optional[float] = None) -> APIResponse[UsageData]:
+        """Report this API key's tier, wallet balance, per period limits
+        and per endpoint call volume for the current Asia/Kolkata calendar
+        month.
+
+        Unmetered like every other account introspection call: checking
+        your own usage never itself burns a credit.
+        """
+        response = self._transport.request("GET", "/usage", timeout=timeout)
+        body = self._transport.parse_envelope(response)
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
+
+    # -- 16. GET /me --------------------------------------------------------
+
+    def me(self, timeout: Optional[float] = None) -> APIResponse[MeData]:
+        """The calling account's own id, email, name, role and (if any)
+        organization id."""
+        response = self._transport.request("GET", "/me", timeout=timeout)
+        body = self._transport.parse_envelope(response)
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
+
+    # -- 17. GET /audit -------------------------------------------------------
+
+    def audit(
+        self,
+        organizationId: Optional[str] = None,
+        userId: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+        startDate: Optional[str] = None,
+        endDate: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> AuditResult:
+        """Fetch this API key's own logged calls (or, for an org admin, an
+        organization's), with summary stats and a top-endpoints breakdown.
+
+        Args:
+            organizationId: must be the caller's own organization, or
+                `PermissionDeniedError`.
+            userId: must be the caller's own id, or (for an org admin) a
+                teammate's, or `PermissionDeniedError`.
+            limit: 1 to 200, default 50.
+            offset: default 0.
+            startDate: ISO 8601.
+            endDate: ISO 8601.
+        """
+        params: Dict[str, Any] = {}
+        _set_if_present(
+            params,
+            organizationId=organizationId,
+            userId=userId,
+            limit=limit,
+            offset=offset,
+            startDate=startDate,
+            endDate=endDate,
+        )
+        response = self._transport.request("GET", "/audit", params=params or None, timeout=timeout)
+        body = self._transport.parse_envelope(response)
+        return AuditResult(
+            data=body.get("data", {}),
+            pagination=body.get("pagination", {}),
+            request_id=body.get("requestId"),
+        )
+
+    # -- 18. GET /reference/courts ----------------------------------------------
+
+    def reference_courts(self, timeout: Optional[float] = None) -> APIResponse[CourtHierarchy]:
+        """The court taxonomy accepted by `court` filters elsewhere in this
+        API: the 4 court types, courts per type, and display names per
+        court. No API key required. Cached for 1 hour server side.
+        """
+        response = self._transport.request("GET", "/reference/courts", require_auth=False, timeout=timeout)
+        body = self._transport.parse_envelope(response)
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
+
+    # -- 19. GET /reference/case-types -------------------------------------------
+
+    def reference_case_types(self, timeout: Optional[float] = None) -> APIResponse[List[CaseTypeEntry]]:
+        """Every `caseType` value accepted elsewhere in this API,
+        deduplicated by code and sorted. No API key required, same caching
+        as `reference_courts`.
+        """
+        response = self._transport.request("GET", "/reference/case-types", require_auth=False, timeout=timeout)
+        body = self._transport.parse_envelope(response)
+        return APIResponse(data=body.get("data", []), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
+
+    # -- 20. POST /party/screen/batch --------------------------------------------
+
+    def screen_party_batch(
+        self,
+        items: List[Dict[str, Any]],
+        purpose: str,
+        entityType: Optional[str] = None,
+        adjudicate: Optional[bool] = None,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[PartyScreenBatchResult]:
+        """Screen up to 25 names in one call.
+
+        Each item is independently priced and can independently fail
+        without failing the whole batch - check `"ok"` on each entry in
+        `result.data["results"]`. Not available on the Free tier. LLM
+        adjudication is not supported here (`adjudicate` may only be
+        `False`/omitted); use `screen_party` one at a time for that. See
+        `screen_party` for the DPDP note: `purpose` is required and is the
+        only thing about the query the server retains in its logs.
+
+        Args:
+            items: 1 to 25 dicts, each shaped like `screen_party`'s own
+                arguments: `{"clientRef": ..., "name": ..., "aliases": ...,
+                "entityType": ..., "identifiers": ..., "address": ...,
+                "knownPersons": ..., "court": ..., "since": ..., "limit": ...,
+                "displayThreshold": ...}`. `clientRef` is optional and is
+                only ever echoed back on the matching result item, to help
+                you line results up with requests; `entityType` falls back
+                to this call's own `entityType` when omitted on an item.
+            purpose: required, same values as `screen_party`.
+            entityType: default `entityType` applied to any item that does
+                not specify its own.
+            adjudicate: batch adjudication is not supported; only `False`
+                or `None` may be passed here.
+            idempotency_key: see `analyze_case`.
+        """
+        payload: Dict[str, Any] = {"items": items, "purpose": purpose}
+        _set_if_present(payload, entityType=entityType, adjudicate=adjudicate)
+        response = self._transport.request(
+            "POST",
+            "/party/screen/batch",
+            json_body=payload,
+            timeout=_SCREEN_PARTY_TIMEOUT if timeout is None else timeout,
+            retry_posts=retry_posts,
+            idempotency_key=self._resolve_idempotency_key(idempotency_key, retry_posts),
+        )
+        body = self._transport.parse_envelope(response)
+        return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))

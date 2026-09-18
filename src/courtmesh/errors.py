@@ -65,6 +65,9 @@ if Literal is not None:
         "VALIDATION_ERROR",
         "MALFORMED_JSON",
         "PAYLOAD_TOO_LARGE",
+        "IDEMPOTENCY_KEY_REUSED",
+        "IDEMPOTENCY_IN_PROGRESS",
+        "IDEMPOTENCY_KEY_INVALID",
     ]
 else:  # pragma: no cover
     ApiRefusalCode = str  # type: ignore[assignment,misc]
@@ -112,6 +115,9 @@ API_REFUSAL_CODES: Tuple[str, ...] = (
     "VALIDATION_ERROR",
     "MALFORMED_JSON",
     "PAYLOAD_TOO_LARGE",
+    "IDEMPOTENCY_KEY_REUSED",
+    "IDEMPOTENCY_IN_PROGRESS",
+    "IDEMPOTENCY_KEY_INVALID",
 )
 
 #: 429 codes safe to retry automatically. Never a daily/monthly cap code.
@@ -308,6 +314,19 @@ class NotFoundError(CourtMeshError):
     """
 
 
+class ConflictError(CourtMeshError):
+    """HTTP 409. An `Idempotency-Key` conflict.
+
+    `code == "IDEMPOTENCY_KEY_REUSED"` when the same key was sent with a
+    different request body than the one it was first used with, or
+    `code == "IDEMPOTENCY_IN_PROGRESS"` when a request with this same key
+    is still being processed concurrently (retry shortly). Only ever raised
+    by `screen_party`, `screen_party_batch`, `analyze_case`,
+    `analyze_consolidated` and `request_timeline`, the five methods that
+    accept an `idempotency_key`.
+    """
+
+
 class RequestTimeoutError(CourtMeshError):
     """HTTP 408. The upstream OpenSearch query took too long, or the SDK's
     own client side timeout fired."""
@@ -374,6 +393,7 @@ STATUS_CODE_TO_EXCEPTION: Dict[int, Type[CourtMeshError]] = {
     402: InsufficientCreditsError,
     403: PermissionDeniedError,
     404: NotFoundError,
+    409: ConflictError,
     408: RequestTimeoutError,
     413: PayloadTooLargeError,
     429: RateLimitError,

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "courtmesh"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python SDK for the CourtMesh API: Indian case law search, case details, AI analysis and document timelines."
 readme = "README.md"
 license = { text = "MIT" }

@@ -615,3 +615,200 @@ def test_get_coverage_unwraps_snapshot_and_sends_api_key(make_client, envelope):
     # client always has one (the constructor requires it) and sends it
     # anyway.
     assert headers.get("Authorization", "").startswith("Bearer ")
+
+
+# -- 15. GET /usage -----------------------------------------------------------
+
+
+def test_get_usage_unwraps_tier_balance_and_by_endpoint(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "tier": "payg",
+            "walletOwner": {"type": "user", "id": "u1"},
+            "balance": {"total": 5000, "monthlyGrant": 0, "signupGrant": 1000, "purchased": 4000},
+            "limits": {"requestsPerMinute": 60, "partyScreensPerMonth": 100},
+            "period": {"start": "2026-09-01T00:00:00.000Z", "end": "2026-09-30T18:29:59.999Z", "key": "2026-09"},
+            "creditsUsedThisPeriod": 340,
+            "byEndpoint": [{"endpoint": "/api/v1/prod/search/cases", "calls": 12, "credits": 12}],
+            "subscriptionRenewsAt": None,
+        },
+        meta={"requestId": "req-usage-1"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.get_usage()
+
+    assert result.data["tier"] == "payg"
+    assert result.data["balance"]["total"] == 5000
+    assert result.data["byEndpoint"][0]["calls"] == 12
+    assert result.meta["requestId"] == "req-usage-1"
+    method, url = mock_request.call_args.args
+    assert method == "GET"
+    assert url.endswith("/usage")
+
+
+# -- 16. GET /health?deep=1 ----------------------------------------------------
+
+
+def test_health_deep_sends_deep_query_param(make_client):
+    client, mock_request = make_client()
+    body = {
+        "success": True,
+        "status": "degraded",
+        "version": "1.0.0",
+        "commit": "abc123",
+        "checks": {"mongo": {"status": "ok", "latencyMs": 12}, "opensearch": {"status": "degraded", "latencyMs": 900}},
+        "timestamp": "2026-09-18T00:00:00.000Z",
+    }
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.health(deep=True)
+
+    assert result["status"] == "degraded"
+    assert result["checks"]["opensearch"]["status"] == "degraded"
+    params = mock_request.call_args.kwargs["params"]
+    assert params == {"deep": "1"}
+
+
+def test_health_plain_sends_no_query_param(make_client):
+    client, mock_request = make_client()
+    body = {"success": True, "status": "healthy", "version": "1.0.0", "timestamp": "2026-09-18T00:00:00.000Z"}
+    mock_request.return_value = FakeResponse(200, body)
+
+    client.health()
+
+    params = mock_request.call_args.kwargs["params"]
+    assert params is None
+
+
+# -- 17. GET /me ----------------------------------------------------------------
+
+
+def test_me_unwraps_account_identity(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(data={"userId": "u1", "email": "a@b.com", "name": "A B", "role": "ORG_ADMIN", "organizationId": "org1"})
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.me()
+
+    assert result.data["userId"] == "u1"
+    assert result.data["organizationId"] == "org1"
+    method, url = mock_request.call_args.args
+    assert url.endswith("/me")
+    headers = mock_request.call_args.kwargs["headers"]
+    assert headers.get("Authorization", "").startswith("Bearer ")
+
+
+# -- 18. GET /audit -------------------------------------------------------------
+
+
+def test_audit_sends_query_params_and_unwraps_hits(make_client):
+    client, mock_request = make_client()
+    body = {
+        "success": True,
+        "data": {
+            "hits": [{"id": "h1", "endpoint": "/api/v1/prod/search/cases", "method": "POST", "statusCode": 200, "responseTime": 120, "createdAt": "2026-09-18T00:00:00.000Z"}],
+            "summary": {"totalHits": 1, "totalAiAnalysisHits": 0, "avgResponseTime": 120, "successfulHits": 1, "successRate": "100.0", "totalCreditsDeducted": 1},
+            "topEndpoints": [{"endpoint": "/api/v1/prod/search/cases", "count": 1}],
+        },
+        "pagination": {"total": 1, "limit": 50, "offset": 0, "hasMore": False},
+    }
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.audit(userId="u1", limit=50, offset=0)
+
+    assert len(result.data["hits"]) == 1
+    assert result.data["summary"]["successRate"] == "100.0"
+    assert result.pagination["total"] == 1
+    method, url = mock_request.call_args.args
+    assert url.endswith("/audit")
+    params = mock_request.call_args.kwargs["params"]
+    assert params == {"userId": "u1", "limit": 50, "offset": 0}
+
+
+# -- 19. GET /reference/courts --------------------------------------------------
+
+
+def test_reference_courts_unwraps_hierarchy_without_requiring_auth(make_client):
+    client, mock_request = make_client()
+    body = {
+        "success": True,
+        "data": {
+            "courtTypes": ["Supreme Court", "High Court", "District Court", "Tribunal"],
+            "courtsByType": {"High Court": ["Delhi High Court"]},
+            "courtNamesByCourt": {"Delhi High Court": ["High Court of Delhi"]},
+        },
+    }
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.reference_courts()
+
+    assert "High Court" in result.data["courtTypes"]
+    assert "Delhi High Court" in result.data["courtsByType"]["High Court"]
+    headers = mock_request.call_args.kwargs["headers"]
+    assert "Authorization" not in headers
+
+
+# -- 20. GET /reference/case-types ----------------------------------------------
+
+
+def test_reference_case_types_unwraps_flattened_list(make_client):
+    client, mock_request = make_client()
+    body = {"success": True, "data": [{"code": "CRL.A", "fullForm": "Criminal Appeal", "primaryType": "Criminal", "nature": "Appellate"}]}
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.reference_case_types()
+
+    assert result.data[0]["code"] == "CRL.A"
+
+
+# -- 21. POST /party/screen/batch ------------------------------------------------
+
+
+def test_screen_party_batch_sends_items_and_unwraps_per_item_results(make_client, envelope):
+    client, mock_request = make_client()
+    body = envelope(
+        data={
+            "results": [
+                {
+                    "clientRef": "row-1",
+                    "index": 0,
+                    "ok": True,
+                    "screen": {
+                        "query": {"name": "Acme Textiles Pvt Ltd", "entityType": "company", "purpose": "due_diligence"},
+                        "summary": {"matchCount": 0, "byBand": {"confirmed": 0, "probable": 0, "possible": 0, "unlikely": 0}, "highestBand": None, "verdict": "no_matches_found"},
+                        "matches": [],
+                        "relatedButUnverified": [],
+                        "coverage": {"exhaustive": True, "exhaustiveWithinFilters": True, "planClamped": False, "anyStrategyErrored": False, "strategiesRun": ["exact"], "someRecordsWithheld": False},
+                        "adjudicationsRun": 0,
+                        "notice": "Results are public court records.",
+                    },
+                },
+                {"clientRef": "row-2", "index": 1, "ok": False, "error": {"code": "VALIDATION_ERROR", "message": "name must be 2..200 characters"}},
+            ],
+            "summary": {"items": 2, "matchesFound": 0, "noMatches": 1, "inconclusive": 0, "errors": 1},
+        },
+        meta={"creditsCharged": 20, "requestId": "req-batch-1"},
+    )
+    mock_request.return_value = FakeResponse(200, body)
+
+    result = client.screen_party_batch(
+        items=[
+            {"clientRef": "row-1", "name": "Acme Textiles Pvt Ltd", "entityType": "company"},
+            {"clientRef": "row-2", "name": "A"},
+        ],
+        purpose="due_diligence",
+    )
+
+    assert result.data["summary"]["items"] == 2
+    assert result.data["results"][0]["ok"] is True
+    assert result.data["results"][1]["ok"] is False
+    assert result.data["results"][1]["error"]["code"] == "VALIDATION_ERROR"
+    assert result.meta["creditsCharged"] == 20
+    method, url = mock_request.call_args.args
+    assert method == "POST"
+    assert url.endswith("/party/screen/batch")
+    sent_body = mock_request.call_args.kwargs["json"]
+    assert sent_body["purpose"] == "due_diligence"
+    assert len(sent_body["items"]) == 2

@@ -112,6 +112,7 @@ class HTTPTransport:
         require_auth: bool = True,
         timeout: Optional[float] = None,
         retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
     ) -> requests.Response:
         """Issue one request, retrying per the rules documented on
         `CourtMesh.__init__`.
@@ -121,11 +122,15 @@ class HTTPTransport:
                 call (used by callers with a longer per endpoint default,
                 e.g. semantic search).
             retry_posts: overrides `self.retry_posts` for this one call.
+            idempotency_key: sent as the `Idempotency-Key` header when
+                given. Stable across every retry attempt of this same call.
         """
         url = "{}{}".format(self.base_url, path)
         headers = {"Accept": "application/json"}
         if require_auth:
             headers.update(self._auth_headers())
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
         effective_timeout = self.timeout if timeout is None else timeout
         effective_retry_posts = self.retry_posts if retry_posts is None else retry_posts
         # R3: a POST is only retried after it has reached the network (a
@@ -214,6 +219,22 @@ class HTTPTransport:
                 "Response body was not valid JSON.",
                 status_code=response.status_code,
             )
+
+        if isinstance(body, dict):
+            # Backfill requestId from the X-Request-Id header for every
+            # success response that does not already carry one somewhere in
+            # its body (some endpoints, e.g. GET /usage, set their own
+            # meta["requestId"] directly - both can coexist).
+            if "requestId" not in body:
+                header_request_id = response.headers.get("X-Request-Id")
+                if header_request_id:
+                    body["requestId"] = header_request_id
+            # Only the five idempotency-key-aware POST methods ever receive
+            # this header, so this is a no-op on every other endpoint.
+            replayed_header = response.headers.get("Idempotency-Replayed")
+            if replayed_header and replayed_header.lower() == "true":
+                body["replayed"] = True
+
         return body
 
     def _raise_error(self, response: requests.Response, body: Any, retry_after_override: Optional[float] = None) -> None:

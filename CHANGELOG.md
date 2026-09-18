@@ -7,6 +7,70 @@ Each entry also states which server flags/behaviour the version targets on
 the CourtMesh research server, since some of this SDK's contract only takes
 effect once a given server flag is on for your account.
 
+## [0.4.0]
+
+Targets the research server's account-introspection endpoints
+(`GET /usage`, `GET /me`, `GET /audit`), the public reference endpoints
+(`GET /reference/courts`, `GET /reference/case-types`), the new
+`POST /party/screen/batch` endpoint, and the `Idempotency-Key` contract
+being rolled out across the five job/charge-triggering POST endpoints.
+
+### Added
+
+- `get_usage()`: `GET /usage`, this key's tier, wallet balance,
+  `TIER_LIMITS` for that tier, the current Asia/Kolkata billing period and a
+  per endpoint call breakdown. Unmetered.
+- `me()`: `GET /me`, the calling account's id, email, name, role and (if
+  any) organization id.
+- `audit(...)`: `GET /audit`, this key's own logged calls (or, for an org
+  admin, an organization's), with summary stats and a top-endpoints
+  breakdown. Takes `organizationId`, `userId`, `limit`, `offset`,
+  `startDate`, `endDate`. Returns a new `AuditResult` dataclass (`data`,
+  `pagination`, `request_id`).
+- `reference_courts()`: `GET /reference/courts`, the court taxonomy
+  accepted by `court` filters elsewhere in this API. No API key required.
+- `reference_case_types()`: `GET /reference/case-types`, every `caseType`
+  value accepted elsewhere in this API. No API key required.
+- `screen_party_batch(items, purpose, ...)`: `POST /party/screen/batch`,
+  screens 1 to 25 names in one call; each item is independently priced and
+  can independently fail (`result.data["results"][i]["ok"]`) without
+  failing the whole batch. Not available on the Free tier. LLM adjudication
+  is not supported in the batch endpoint.
+- `health()` now takes a `deep` argument, `health(deep=True)` calls
+  `GET /health?deep=1`: also checks Mongo, OpenSearch, Qdrant, Redis and IAM
+  standing, and reports `status in ("degraded", "unhealthy")` plus a
+  `checks` dict per dependency. `HealthResponse` gained `commit` and
+  `checks`.
+- `idempotency_key` argument on `screen_party`, `screen_party_batch`,
+  `analyze_case`, `analyze_consolidated` and `request_timeline`: sent as
+  the `Idempotency-Key` header (1 to 128 characters, `[A-Za-z0-9_.-]`,
+  scoped per API key for 24 hours). A replayed call with the same key and
+  body returns the stored response again (`result.replayed is True`, no
+  new charge); the same key with a different body raises `ConflictError`
+  with `code == "IDEMPOTENCY_KEY_REUSED"`. When omitted, and `retry_posts`
+  is in effect for that call (the call's own override, or the client's
+  default), the SDK auto-generates a UUID v4 so an automatic retry of that
+  exact call is always safe from a double charge or a double-run job.
+- `APIResponse.request_id` / `.replayed` (also on `SearchCasesResult` and
+  `SemanticSearchResult`, `request_id` only): every response now carries
+  the request id, either the server's own `meta["requestId"]`/body level
+  `requestId` when it set one, or (backfilled client side as a fallback)
+  the `X-Request-Id` response header. `replayed` is `True` when the
+  response carried `Idempotency-Replayed: true`.
+- `ConflictError` (409): raised by the five idempotency-key-aware methods
+  when the same `Idempotency-Key` was reused with a different body
+  (`code == "IDEMPOTENCY_KEY_REUSED"`) or a request with that key is still
+  in flight (`code == "IDEMPOTENCY_IN_PROGRESS"`).
+  `IDEMPOTENCY_KEY_REUSED`, `IDEMPOTENCY_IN_PROGRESS` and
+  `IDEMPOTENCY_KEY_INVALID` added to `API_REFUSAL_CODES`/`ApiRefusalCode`.
+- New models: `ApiTier`, `UsageData`/`UsageMeta`/`UsageBalance`/
+  `UsageTierLimits`/`UsagePeriod`/`UsageByEndpoint`/`UsageWalletOwner`,
+  `MeData`, `AuditResult`/`AuditData`/`AuditHit`/`AuditSummary`/
+  `AuditTopEndpoint`/`AuditPagination`, `CourtHierarchy`/`CourtNamesMap`,
+  `CaseTypeEntry`, `PartyScreenBatchItemOk`/`PartyScreenBatchError`/
+  `PartyScreenBatchItemResult`/`PartyScreenBatchSummary`/
+  `PartyScreenBatchResult`/`PartyScreenBatchMeta`, `HealthCheckResult`.
+
 ## [0.3.0]
 
 Targets the research server after the 2026-09-18 API abuse-control and
