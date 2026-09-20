@@ -470,8 +470,10 @@ class RelatedMeta(TypedDict, total=False):
 
 
 class PdfResponse(TypedDict, total=False):
-    """`pdfUrl` is ciphertext, not a fetchable URL, it requires a case
-    specific decryption key that is not part of this API surface.
+    """`pdfUrl` is a directly fetchable HTTPS link on the CourtMesh API host.
+
+    It carries its own short lived signed token, so it needs no API key and no
+    decryption, and fetching it costs no credits. Valid for `expiresIn` seconds.
     """
 
     pdfUrl: str

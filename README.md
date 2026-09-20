@@ -205,12 +205,12 @@ for event in result.data["timeline"]:
 
 ```python
 result = cm.get_case_pdf("64f0abc123...")
-print(result.data["pdfUrl"])       # ciphertext, expires in result.data["expiresIn"] seconds
+print(result.data["pdfUrl"])       # a fetchable link, valid for result.data["expiresIn"] seconds
 ```
 
-Note: `pdfUrl` is an encrypted, presigned S3 URL, not a directly fetchable
-link. Decrypting it needs a case specific key that is not part of this API
-surface. Failure codes: `CASE_NOT_FOUND` (404), `CASE_RESTRICTED` (403),
+Note: `pdfUrl` is a directly fetchable HTTPS link on the CourtMesh API host.
+It carries its own short lived signed token, so it needs no API key and no
+decryption, and fetching it costs no credits. Failure codes: `CASE_NOT_FOUND` (404), `CASE_RESTRICTED` (403),
 `PDF_NOT_STORED` (404, no stored document - `request_timeline` with
 `refresh=True` may fetch one for High Court and District Court cases).
 
@@ -507,8 +507,6 @@ except CourtMeshError as exc:
 
 ## Caveats (real server behaviour, not SDK limitations)
 
-- **`get_case_pdf`'s `pdfUrl` is ciphertext, not a fetchable URL.**
-  Decrypting it uses a case specific key and is outside this API surface.
 - Two different pagination shapes exist and are not unified:
   - `search_cases`: `{"total", "hasMore", "page"?, "limit", "nextCursor"}`.
     `page` is absent when you used `searchAfter` cursor pagination,

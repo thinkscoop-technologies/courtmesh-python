@@ -545,11 +545,12 @@ class CourtMesh:
     # -- 7. GET /cases/{id}/pdf ----------------------------------------------
 
     def get_case_pdf(self, case_id: str, timeout: Optional[float] = None) -> APIResponse[PdfResponse]:
-        """Fetch an encrypted, presigned S3 URL for the case PDF.
+        """Fetch a time limited download link for the case PDF.
 
-        `data["pdfUrl"]` is ciphertext, valid for `data["expiresIn"]`
-        seconds (3600). Decrypting it requires a case specific key that is
-        not part of this API surface.
+        `data["pdfUrl"]` is a directly fetchable HTTPS link on the CourtMesh
+        API host, valid for `data["expiresIn"]` seconds (3600). It carries its
+        own signed token, so it needs no API key and no decryption, and
+        fetching it costs no credits.
 
         Failure codes: `CASE_NOT_FOUND` (404), `CASE_RESTRICTED` (403),
         `PDF_NOT_STORED` (404, no stored document - `request_timeline` with

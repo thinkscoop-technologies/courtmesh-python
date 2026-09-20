@@ -251,7 +251,7 @@ def test_get_related_without_case_number(make_client, envelope):
 def test_get_case_pdf(make_client, envelope):
     client, mock_request = make_client()
     body = envelope(
-        data={"pdfUrl": "ENCRYPTED_CIPHERTEXT", "expiresIn": 3600, "caseId": "1", "caseNumber": "123/2021", "caseTitle": "State v. X"},
+        data={"pdfUrl": "https://research.courtmesh.ai/api/v1/prod/cases/1/pdf/download?token=t", "expiresIn": 3600, "caseId": "1", "caseNumber": "123/2021", "caseTitle": "State v. X"},
         meta={"responseTime": "2ms", "note": "The PDF URL is encrypted and expires in 1 hour. Use the decryption key provided in your SDK."},
     )
     mock_request.return_value = FakeResponse(200, body)
@@ -259,7 +259,7 @@ def test_get_case_pdf(make_client, envelope):
     result = client.get_case_pdf("1")
 
     assert result.data["expiresIn"] == 3600
-    assert result.data["pdfUrl"] == "ENCRYPTED_CIPHERTEXT"
+    assert result.data["pdfUrl"] == "https://research.courtmesh.ai/api/v1/prod/cases/1/pdf/download?token=t"
     method, url = mock_request.call_args.args
     assert url.endswith("/cases/1/pdf")
 
