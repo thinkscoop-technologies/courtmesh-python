@@ -11,6 +11,7 @@ import requests
 
 from ._http import DEFAULT_MAX_RETRIES, DEFAULT_MAX_RETRY_AFTER_SECONDS, DEFAULT_TIMEOUT, HTTPTransport
 from .errors import CourtMeshError
+from .monitoring import cnr_for_request
 from .models import (
     APIResponse,
     AnalyzeResponse,
@@ -19,9 +20,12 @@ from .models import (
     CaseAnalysisResponse,
     CaseDetails,
     CaseTypeEntry,
+    ChangeEvent,
+    CnrLookup,
     ConsolidatedAnalyzeResponse,
     CourtHierarchy,
     CoverageData,
+    CursorListResult,
     HealthResponse,
     MeData,
     PartyScreenBatchResult,
@@ -33,6 +37,10 @@ from .models import (
     SemanticSearchResult,
     TimelineJob,
     UsageData,
+    Watchlist,
+    WatchlistItem,
+    Webhook,
+    WebhookDelivery,
 )
 
 DEFAULT_BASE_URL = "https://research.courtmesh.ai/api/v1/prod"
@@ -57,6 +65,38 @@ def _set_if_present(payload: Dict[str, Any], **fields: Any) -> None:
     for key, value in fields.items():
         if value is not None:
             payload[key] = value
+
+
+def _seg(value: Any) -> str:
+    """URL-encode one path segment."""
+    return quote(str(value), safe="")
+
+
+def _compact(**fields: Any) -> Dict[str, Any]:
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _normalized_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(item)
+    if "cnr" in normalized:
+        normalized["cnr"] = cnr_for_request(normalized["cnr"])
+    return normalized
+
+
+def _changes_params(
+    cursor: Optional[str],
+    since: Optional[str],
+    types: Optional[StrOrList],
+    cnr: Optional[str],
+    limit: Optional[int],
+) -> Dict[str, Any]:
+    return _compact(
+        cursor=cursor,
+        since=since,
+        types=types if types is None or isinstance(types, str) else ",".join(types),
+        cnr=cnr_for_request(cnr) if cnr is not None else None,
+        limit=limit,
+    )
 
 
 def _generate_idempotency_key() -> str:
@@ -208,7 +248,7 @@ class CourtMesh:
 
     def search_cases(
         self,
-        query: str,
+        query: Optional[str] = None,
         court: Optional[StrOrList] = None,
         year: Optional[IntOrList] = None,
         caseType: Optional[StrOrList] = None,
@@ -225,11 +265,16 @@ class CourtMesh:
         sortBy: Optional[str] = None,
         timeout: Optional[float] = None,
         retry_posts: Optional[bool] = None,
+        cnr: Optional[str] = None,
     ) -> SearchCasesResult:
         """Keyword search over the OpenSearch v3 case index.
 
         Args:
-            query: required, at least 1 character after trimming.
+            query: at least 1 character after trimming. Required unless
+                `cnr` is given.
+            cnr: exact CNR match (no fuzzy text matching). Any common
+                spelling is accepted and normalised to the canonical 16
+                characters before sending. When present, `query` is optional.
             court, caseType, judgeName, judges, judge: a single string or a
                 list of strings. `judgeName`, `judges` and `judge` are
                 aliases for the same filter, the handler uses
@@ -262,7 +307,11 @@ class CourtMesh:
             timeout: per call timeout override, in seconds.
             retry_posts: per call override of the client's `retry_posts`.
         """
-        payload: Dict[str, Any] = {"query": query}
+        payload: Dict[str, Any] = {}
+        if query is not None:
+            payload["query"] = query
+        if cnr is not None:
+            payload["cnr"] = cnr_for_request(cnr)
         _set_if_present(
             payload,
             court=court,
@@ -675,10 +724,10 @@ class CourtMesh:
 
         Args:
             refresh: force a live fetch from the court portal instead of
-                serving the last stored read. Default False. Costs 20
-                credits when it actually triggers live work, versus 1
-                credit for a stored read - see `result.meta["liveFetch"]`
-                to see which one happened. Not available on the Free tier
+                serving the last stored read. Default False. Costs 1
+                credit, the same as a stored read (it was 20 before 0.5.0);
+                `result.meta["liveFetch"]` says whether live work happened.
+                Not available on the Free tier
                 (`PermissionDeniedError`, `code == "LIVE_FETCH_NOT_ALLOWED"`)
                 and capped per day per tier
                 (`RateLimitError`, `code == "LIVE_FETCH_LIMIT_REACHED"`).
@@ -997,3 +1046,401 @@ class CourtMesh:
         )
         body = self._transport.parse_envelope(response)
         return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
+
+    # -- CNR lookup, watchlists, change feed, webhooks (0.5.0) -------------
+
+    def _envelope(self, response: Any) -> APIResponse[Any]:
+        body = self._transport.parse_envelope(response)
+        return APIResponse(
+            data=body.get("data", {}),
+            meta=body.get("meta", {}),
+            request_id=body.get("requestId"),
+            replayed=body.get("replayed"),
+        )
+
+    def _list_result(self, response: Any) -> CursorListResult[Any]:
+        body = self._transport.parse_envelope(response)
+        return CursorListResult(
+            data=body.get("data", []),
+            pagination=body.get("pagination", {}),
+            meta=body.get("meta", {}),
+            request_id=body.get("requestId"),
+        )
+
+    def _post(
+        self,
+        path: str,
+        payload: Optional[Dict[str, Any]],
+        timeout: Optional[float],
+        retry_posts: Optional[bool],
+        idempotency_key: Optional[str],
+    ) -> APIResponse[Any]:
+        response = self._transport.request(
+            "POST",
+            path,
+            json_body=payload,
+            timeout=timeout,
+            retry_posts=retry_posts,
+            idempotency_key=self._resolve_idempotency_key(idempotency_key, retry_posts),
+        )
+        return self._envelope(response)
+
+    def _patch(
+        self, path: str, payload: Dict[str, Any], timeout: Optional[float], retry_posts: Optional[bool]
+    ) -> APIResponse[Any]:
+        response = self._transport.request("PATCH", path, json_body=payload, timeout=timeout, retry_posts=retry_posts)
+        return self._envelope(response)
+
+    def _delete(self, path: str, timeout: Optional[float]) -> APIResponse[Dict[str, Any]]:
+        """DELETE; a 204 with no body becomes `{"deleted": True}`."""
+        response = self._transport.request("DELETE", path, timeout=timeout)
+        if response.status_code == 204:
+            return APIResponse(data={"deleted": True}, meta={}, request_id=response.headers.get("X-Request-Id"))
+        return self._envelope(response)
+
+    def _iter_cursor(self, fetch_page: Any, stop_on_empty: bool, max_pages: Optional[int]) -> Iterator[Any]:
+        """Yield every item, following `pagination["nextCursor"]`. For the
+        change feed an empty page means caught up and stops the walk (an
+        empty page is free). Other lists stop when there is no next cursor."""
+        cursor: Optional[str] = None
+        hard_cap = _MAX_SAFETY_PAGES if max_pages is None else min(max_pages, _MAX_SAFETY_PAGES)
+        for _ in range(hard_cap):
+            result = fetch_page(cursor)
+            items = result.data or []
+            if not items and stop_on_empty:
+                return
+            for item in items:
+                yield item
+            next_cursor = result.pagination.get("nextCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+                return
+            if not stop_on_empty and result.pagination.get("hasMore") is False:
+                return
+            cursor = next_cursor
+
+    def get_case_by_cnr(
+        self, cnr: str, fetch: bool = False, timeout: Optional[float] = None
+    ) -> APIResponse[CnrLookup]:
+        """Look a case up by CNR (any common spelling, normalised for you).
+
+        1 credit, charged only when a record is returned. `result.data["status"]`
+        is `found` (200, `result.data["case"]` holds the record) or `pending`
+        (202, a live fetch is running: poll this same call, or `get_timeline`
+        with `result.data["requestId"]`). A CNR that is not in the corpus and
+        was not fetched raises `NotFoundError` (`code == "CASE_NOT_FOUND"`).
+
+        Args:
+            fetch: start a live court portal fetch for a CNR we do not hold
+                yet. 1 credit once the fetch is accepted; shares the daily
+                live fetch cap with `request_timeline(refresh=True)`.
+        """
+        path = "/cases/by-cnr/{}".format(quote(cnr_for_request(cnr), safe=""))
+        response = self._transport.request("GET", path, params={"fetch": "true"} if fetch else None, timeout=timeout)
+        return self._envelope(response)
+
+    # Watchlists
+
+    def create_watchlist(
+        self,
+        name: str,
+        items: Optional[Sequence[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[Dict[str, Any]]:
+        """Create a watchlist, optionally with up to 100 CNRs to start watching.
+
+        `result.data["results"]` has one outcome per CNR (`watching`,
+        `pending`, `invalid`, `duplicate`, `cap_exceeded`, `not_found`); a
+        partial success is still a 200. Management calls are free.
+        """
+        payload: Dict[str, Any] = {"name": name}
+        if items is not None:
+            payload["items"] = [_normalized_item(item) for item in items]
+        if metadata is not None:
+            payload["metadata"] = metadata
+        return self._post("/watchlists", payload, timeout, retry_posts, idempotency_key)
+
+    def list_watchlists(
+        self, cursor: Optional[str] = None, limit: Optional[int] = None, timeout: Optional[float] = None
+    ) -> CursorListResult[Watchlist]:
+        """One page of your watchlists."""
+        params = _compact(cursor=cursor, limit=limit)
+        return self._list_result(self._transport.request("GET", "/watchlists", params=params, timeout=timeout))
+
+    def iter_watchlists(self, limit: Optional[int] = None, max_pages: Optional[int] = None) -> Iterator[Watchlist]:
+        """Yield every watchlist, following cursors."""
+        return self._iter_cursor(lambda c: self.list_watchlists(cursor=c, limit=limit), False, max_pages)
+
+    def get_watchlist(self, watchlist_id: str, timeout: Optional[float] = None) -> APIResponse[Watchlist]:
+        response = self._transport.request("GET", "/watchlists/{}".format(_seg(watchlist_id)), timeout=timeout)
+        return self._envelope(response)
+
+    def update_watchlist(
+        self,
+        watchlist_id: str,
+        name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+    ) -> APIResponse[Watchlist]:
+        """Rename a watchlist and/or replace its metadata."""
+        payload = _compact(name=name, metadata=metadata)
+        return self._patch("/watchlists/{}".format(_seg(watchlist_id)), payload or {}, timeout, retry_posts)
+
+    def delete_watchlist(self, watchlist_id: str, timeout: Optional[float] = None) -> APIResponse[Dict[str, Any]]:
+        """Delete a watchlist and its items. Events already emitted stay readable in `list_changes`."""
+        return self._delete("/watchlists/{}".format(_seg(watchlist_id)), timeout)
+
+    def add_watchlist_items(
+        self,
+        watchlist_id: str,
+        items: Sequence[Dict[str, Any]],
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[Dict[str, Any]]:
+        """Add 1 to 100 CNRs. Each gets a result in `result.data["results"]`:
+        `watching`, `pending` (not in the corpus yet, so a live fetch was
+        started), `invalid`, `duplicate`, `cap_exceeded` or `not_found`.
+
+        Each item is a dict like `{"cnr": "...", "reference": "LOAN-42", "label": "..."}`.
+        """
+        payload = {"items": [_normalized_item(item) for item in items]}
+        return self._post(
+            "/watchlists/{}/items".format(_seg(watchlist_id)), payload, timeout, retry_posts, idempotency_key
+        )
+
+    def list_watchlist_items(
+        self,
+        watchlist_id: str,
+        status: Optional[str] = None,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> CursorListResult[WatchlistItem]:
+        """One page of the CNRs in a watchlist, optionally filtered by `status`
+        (`watching`, `pending`, `not_found`, `error`)."""
+        params = _compact(cursor=cursor, limit=limit, status=status)
+        path = "/watchlists/{}/items".format(_seg(watchlist_id))
+        return self._list_result(self._transport.request("GET", path, params=params, timeout=timeout))
+
+    def iter_watchlist_items(
+        self,
+        watchlist_id: str,
+        status: Optional[str] = None,
+        limit: Optional[int] = None,
+        max_pages: Optional[int] = None,
+    ) -> Iterator[WatchlistItem]:
+        """Yield every item in a watchlist, following cursors."""
+        return self._iter_cursor(
+            lambda c: self.list_watchlist_items(watchlist_id, status=status, cursor=c, limit=limit), False, max_pages
+        )
+
+    def remove_watchlist_item(
+        self, watchlist_id: str, cnr: str, timeout: Optional[float] = None
+    ) -> APIResponse[Dict[str, Any]]:
+        """Stop watching one CNR in one watchlist."""
+        path = "/watchlists/{}/items/{}".format(_seg(watchlist_id), _seg(cnr_for_request(cnr)))
+        return self._delete(path, timeout)
+
+    # Change feed
+
+    def list_changes(
+        self,
+        cursor: Optional[str] = None,
+        since: Optional[str] = None,
+        types: Optional[StrOrList] = None,
+        cnr: Optional[str] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> CursorListResult[ChangeEvent]:
+        """One page of change events across all your watchlists, oldest first.
+
+        1 credit per non-empty page of up to 100 events; an empty page is free.
+        `result.next_cursor` is always returned, even on an empty page, so you
+        can store it and poll forward forever by passing it back as `cursor`.
+        `since` (ISO timestamp) is used only when there is no `cursor`.
+        Events are kept for 90 days. Delivery is at least once across
+        webhooks, so dedupe on the event `id`.
+        """
+        params = _changes_params(cursor, since, types, cnr, limit)
+        return self._list_result(self._transport.request("GET", "/changes", params=params, timeout=timeout))
+
+    def iter_changes(
+        self,
+        since: Optional[str] = None,
+        types: Optional[StrOrList] = None,
+        cnr: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        max_pages: Optional[int] = None,
+    ) -> Iterator[ChangeEvent]:
+        """Yield every change event until caught up. Stops at the first empty
+        page (which is free). To keep a durable position between runs, call
+        `list_changes` yourself and store `result.next_cursor`."""
+        first = {"cursor": cursor}
+
+        def fetch(c: Optional[str]) -> CursorListResult[ChangeEvent]:
+            return self.list_changes(cursor=c or first["cursor"], since=since, types=types, cnr=cnr, limit=limit)
+
+        return self._iter_cursor(fetch, True, max_pages)
+
+    def list_watchlist_events(
+        self,
+        watchlist_id: str,
+        cursor: Optional[str] = None,
+        since: Optional[str] = None,
+        types: Optional[StrOrList] = None,
+        cnr: Optional[str] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> CursorListResult[ChangeEvent]:
+        """Same as `list_changes`, filtered to one watchlist. Same pricing."""
+        params = _changes_params(cursor, since, types, cnr, limit)
+        path = "/watchlists/{}/events".format(_seg(watchlist_id))
+        return self._list_result(self._transport.request("GET", path, params=params, timeout=timeout))
+
+    def iter_watchlist_events(
+        self,
+        watchlist_id: str,
+        since: Optional[str] = None,
+        types: Optional[StrOrList] = None,
+        cnr: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        max_pages: Optional[int] = None,
+    ) -> Iterator[ChangeEvent]:
+        """Yield every event of one watchlist until caught up. See `iter_changes`."""
+        first = {"cursor": cursor}
+
+        def fetch(c: Optional[str]) -> CursorListResult[ChangeEvent]:
+            return self.list_watchlist_events(
+                watchlist_id, cursor=c or first["cursor"], since=since, types=types, cnr=cnr, limit=limit
+            )
+
+        return self._iter_cursor(fetch, True, max_pages)
+
+    # Webhooks
+
+    def create_webhook(
+        self,
+        url: str,
+        events: Optional[Sequence[str]] = None,
+        watchlist_ids: Optional[Sequence[str]] = None,
+        description: Optional[str] = None,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[Webhook]:
+        """Register a webhook endpoint (https only).
+
+        `result.data["secret"]` is shown once, here and on
+        `rotate_webhook_secret`: store it. Use it with
+        `verify_webhook_signature`. `events` defaults to every `case.*`
+        type; `watchlist_ids` defaults to all watchlists.
+        """
+        payload = _compact(
+            url=url,
+            events=list(events) if events is not None else None,
+            watchlistIds=list(watchlist_ids) if watchlist_ids is not None else None,
+            description=description,
+        )
+        return self._post("/webhooks", payload, timeout, retry_posts, idempotency_key)
+
+    def list_webhooks(
+        self, cursor: Optional[str] = None, limit: Optional[int] = None, timeout: Optional[float] = None
+    ) -> CursorListResult[Webhook]:
+        params = _compact(cursor=cursor, limit=limit)
+        return self._list_result(self._transport.request("GET", "/webhooks", params=params, timeout=timeout))
+
+    def iter_webhooks(self, limit: Optional[int] = None, max_pages: Optional[int] = None) -> Iterator[Webhook]:
+        """Yield every webhook endpoint, following cursors."""
+        return self._iter_cursor(lambda c: self.list_webhooks(cursor=c, limit=limit), False, max_pages)
+
+    def get_webhook(self, webhook_id: str, timeout: Optional[float] = None) -> APIResponse[Webhook]:
+        """Never returns the secret."""
+        response = self._transport.request("GET", "/webhooks/{}".format(_seg(webhook_id)), timeout=timeout)
+        return self._envelope(response)
+
+    def update_webhook(
+        self,
+        webhook_id: str,
+        url: Optional[str] = None,
+        events: Optional[Sequence[str]] = None,
+        watchlist_ids: Optional[Sequence[str]] = None,
+        description: Optional[str] = None,
+        enabled: Optional[bool] = None,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+    ) -> APIResponse[Webhook]:
+        """Change the URL, event filter, watchlist filter or description, or
+        re-enable a disabled endpoint with `enabled=True`."""
+        payload = _compact(
+            url=url,
+            events=list(events) if events is not None else None,
+            watchlistIds=list(watchlist_ids) if watchlist_ids is not None else None,
+            description=description,
+            enabled=enabled,
+        )
+        return self._patch("/webhooks/{}".format(_seg(webhook_id)), payload, timeout, retry_posts)
+
+    def delete_webhook(self, webhook_id: str, timeout: Optional[float] = None) -> APIResponse[Dict[str, Any]]:
+        return self._delete("/webhooks/{}".format(_seg(webhook_id)), timeout)
+
+    def rotate_webhook_secret(
+        self,
+        webhook_id: str,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[Webhook]:
+        """Issue a new signing secret. The old secret keeps signing in
+        parallel for 24 hours (deliveries then carry two `v1=` signatures),
+        so you can switch over without dropping events."""
+        path = "/webhooks/{}/rotate-secret".format(_seg(webhook_id))
+        return self._post(path, None, timeout, retry_posts, idempotency_key)
+
+    def test_webhook(
+        self,
+        webhook_id: str,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[WebhookDelivery]:
+        """Send a `webhook.test` event to the endpoint now and return the delivery attempt result."""
+        path = "/webhooks/{}/test".format(_seg(webhook_id))
+        return self._post(path, None, timeout, retry_posts, idempotency_key)
+
+    def list_webhook_deliveries(
+        self,
+        webhook_id: str,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> CursorListResult[WebhookDelivery]:
+        """One page of delivery attempts for an endpoint."""
+        params = _compact(cursor=cursor, limit=limit)
+        path = "/webhooks/{}/deliveries".format(_seg(webhook_id))
+        return self._list_result(self._transport.request("GET", path, params=params, timeout=timeout))
+
+    def iter_webhook_deliveries(
+        self, webhook_id: str, limit: Optional[int] = None, max_pages: Optional[int] = None
+    ) -> Iterator[WebhookDelivery]:
+        """Yield every delivery attempt for an endpoint, following cursors."""
+        return self._iter_cursor(
+            lambda c: self.list_webhook_deliveries(webhook_id, cursor=c, limit=limit), False, max_pages
+        )
+
+    def retry_webhook_delivery(
+        self,
+        webhook_id: str,
+        delivery_id: str,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[WebhookDelivery]:
+        """Re-queue one delivery to be sent now."""
+        path = "/webhooks/{}/deliveries/{}/retry".format(_seg(webhook_id), _seg(delivery_id))
+        return self._post(path, None, timeout, retry_posts, idempotency_key)

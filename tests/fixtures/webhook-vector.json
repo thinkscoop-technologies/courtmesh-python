@@ -1,0 +1,9 @@
+{
+  "note": "Shared known answer test vector. The same file content is used by the Python SDK tests.",
+  "secret": "whsec_testsecret0123456789abcdefghijklmnopqrstuvw",
+  "rotatedSecret": "whsec_rotated0123456789abcdefghijklmnopqrstuvwxyz",
+  "timestamp": 1790000000,
+  "rawBody": "{\"id\":\"evt_01HTESTVECTOR\",\"type\":\"case.hearing_date_changed\",\"createdAt\":\"2026-11-02T09:15:00.000Z\",\"cnr\":\"DLHC010084212021\",\"caseId\":\"65f0c0ffee0000000000abcd\",\"watchlists\":[{\"id\":\"wl_01HTEST\",\"reference\":\"LOAN-42\"}],\"data\":{\"previous\":\"2026-11-10\",\"current\":\"2026-12-04\",\"snapshot\":{}}}",
+  "signature": "a377dfd298e506ea18514bc5caeb5d30656b7a24c83342e8745a5d729d1574fd",
+  "rotatedSignature": "6bda1dbc6bd9b1e2d5976e1c0a3897c2174b332dbd3f0aed439cdb8d4208b79f"
+}

@@ -7,6 +7,28 @@ Each entry also states which server flags/behaviour the version targets on
 the CourtMesh research server, since some of this SDK's contract only takes
 effect once a given server flag is on for your account.
 
+## [0.5.0]
+
+Adds CNR lookup and case monitoring (API docs 1.3.0).
+
+### Added
+
+- `get_case_by_cnr(cnr, fetch=False)` for `GET /cases/by-cnr/{cnr}`, and a `cnr` argument on `search_cases` (exact match; `query` is now optional when `cnr` is given).
+- Watchlists: `create_watchlist`, `list_watchlists`, `get_watchlist`, `update_watchlist`, `delete_watchlist`, `add_watchlist_items`, `list_watchlist_items`, `remove_watchlist_item`.
+- Change feed: `list_changes`, `list_watchlist_events`, with generators `iter_changes` and `iter_watchlist_events` that walk pages until caught up.
+- Webhooks: `create_webhook`, `list_webhooks`, `get_webhook`, `update_webhook`, `delete_webhook`, `rotate_webhook_secret`, `test_webhook`, `list_webhook_deliveries`, `retry_webhook_delivery`, plus `iter_watchlists`, `iter_watchlist_items`, `iter_webhooks` and `iter_webhook_deliveries`.
+- `verify_webhook_signature(raw_body, header, secret, tolerance_seconds=300)` and `WebhookSignatureError`.
+- `normalize_cnr` and `assert_cnr`, exported, matching the server's CNR normalisation.
+- Typed models for all of the above, including `ChangeEvent` and `CursorListResult`.
+- `PATCH` and `DELETE` support in the HTTP layer. `DELETE` is retried like `GET`; `PATCH` and all new `POST` calls follow the `retry_posts` rule and send an `Idempotency-Key` when it is in effect.
+
+### Changed
+
+- `request_timeline(refresh=True)` now costs 1 credit (it was 20). Docs and docstrings updated.
+- `search_cases` takes `query` as optional (required unless `cnr` is set).
+- `User-Agent` is `courtmesh-python/0.5.0`.
+- Project URLs now point at `github.com/thinkscoop-technologies/courtmesh-python`.
+
 ## [0.4.1]
 
 Live QA pass against the redeployed production research server

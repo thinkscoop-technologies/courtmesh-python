@@ -14,7 +14,7 @@ few real server quirks are documented explicitly rather than hidden, see
 pip install courtmesh
 ```
 
-Or, from a local checkout:
+Requires Python 3.9 or newer. Or, from a local checkout:
 
 ```bash
 pip install -e ".[test]"
@@ -252,8 +252,8 @@ print(result.data["consolidatedAnalysis"]["summary"])
 ### 10. `request_timeline`, `POST /request-timeline`
 
 `case_id` must be a Mongo ObjectId string. `refresh=True` forces a live
-court-portal fetch (20 credits) instead of serving the last stored read (1
-credit) - `result.meta["liveFetch"]` says which one actually happened,
+court-portal fetch instead of serving the last stored read. Both cost 1
+credit, and `result.meta["liveFetch"]` says which one actually happened;
 `result.data.get("liveFetchSupported")` comes back `False` when the case's
 court has no live refresh at all. Not available on the Free tier
 (`PermissionDeniedError`, `code == "LIVE_FETCH_NOT_ALLOWED"`) and capped
@@ -326,6 +326,135 @@ print(result.data["districtCourts"].get("records"))
 ```
 
 Most fields are optional (use `.get(...)` rather than `[...]`), since a court or year row may not report every stat.
+
+## CNR lookup and case monitoring
+
+Look a case up by CNR (any common spelling works), or watch a list of CNRs
+and be told when something changes. Tracking is free within your plan's
+watch cap; you pay only for reading the change feed (1 credit per non-empty
+page of up to 100 events) and for CNR lookups (1 credit per record returned).
+
+```python
+import os
+from courtmesh import CourtMesh, normalize_cnr
+
+normalize_cnr("CNR: DLHC-01-008421-2021")  # "DLHC010084212021", or None if it cannot be a CNR
+
+with CourtMesh(api_key=os.environ["COURTMESH_API_KEY"]) as cm:
+    # One-off lookup. fetch=True starts a live fetch for a CNR we do not hold yet.
+    lookup = cm.get_case_by_cnr("DLHC010084212021", fetch=True)
+    print(lookup.data["status"])  # "found" | "pending"
+
+    # 1. Watch a CNR.
+    wl = cm.create_watchlist(
+        "Loan book",
+        items=[{"cnr": "DLHC010084212021", "reference": "LOAN-42"}],
+    )
+    print(wl.data["id"], wl.data["results"])  # per item: watching | pending | invalid | duplicate | cap_exceeded | not_found
+
+    # 2. Poll the change feed. Store next_cursor and pass it back next time.
+    page = cm.list_changes(cursor=load_cursor(), types=["case.hearing_date_changed", "case.order_added"])
+    for event in page.data:
+        print(event["type"], event["cnr"], event["data"])
+    save_cursor(page.next_cursor)  # returned even when the page is empty
+
+    # Or walk everything until caught up.
+    for event in cm.iter_changes(since="2026-11-01T00:00:00Z"):
+        handle(event)
+```
+
+### Receive webhooks
+
+Create an endpoint (https only). The `secret` is shown once, so store it.
+
+```python
+hook = cm.create_webhook("https://example.com/hooks/courtmesh")
+print(hook.data["secret"])  # whsec_...
+cm.test_webhook(hook.data["id"])  # sends a webhook.test event now
+```
+
+Verify every delivery with the RAW request body. Flask:
+
+```python
+import os
+from flask import Flask, request
+from courtmesh import verify_webhook_signature, WebhookSignatureError
+
+app = Flask(__name__)
+
+@app.post("/hooks/courtmesh")
+def courtmesh_hook():
+    try:
+        event = verify_webhook_signature(
+            request.get_data(),  # raw bytes, not request.json
+            request.headers.get("CourtMesh-Signature"),
+            os.environ["COURTMESH_WEBHOOK_SECRET"],
+        )
+    except WebhookSignatureError:
+        return "bad signature", 400
+    # Delivery is at least once: dedupe on event["id"] (also sent as the CourtMesh-Event-Id header).
+    print(event["type"], event["cnr"])
+    return "", 200  # any 2xx within 10 seconds counts as delivered
+```
+
+FastAPI:
+
+```python
+import os
+from fastapi import FastAPI, HTTPException, Request
+from courtmesh import verify_webhook_signature, WebhookSignatureError
+
+app = FastAPI()
+
+@app.post("/hooks/courtmesh")
+async def courtmesh_hook(request: Request):
+    raw = await request.body()
+    try:
+        event = verify_webhook_signature(
+            raw, request.headers.get("CourtMesh-Signature"), os.environ["COURTMESH_WEBHOOK_SECRET"]
+        )
+    except WebhookSignatureError:
+        raise HTTPException(status_code=400, detail="bad signature")
+    return {"ok": True}
+```
+
+`verify_webhook_signature(raw_body, header, secret, tolerance_seconds=300)`
+rejects a timestamp more than 300 seconds from now, computes HMAC-SHA256 over
+`"<t>.<raw body>"` and compares in constant time against every `v1=` value in
+the header (two during a 24 hour secret rotation). Pass a list of secrets to
+cover your side of a rotation. It returns the parsed event or raises
+`WebhookSignatureError` (`exc.reason` says why).
+
+Failed deliveries are retried after 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and
+24 h. Use `list_webhook_deliveries(id)` to inspect attempts and
+`retry_webhook_delivery(id, delivery_id)` to re-send one.
+
+### Monitoring methods
+
+| Method | Endpoint | Credits |
+|---|---|---|
+| `get_case_by_cnr(cnr, fetch=False)` | `GET /cases/by-cnr/{cnr}` | 1 when a record is returned |
+| `search_cases(cnr=...)` | `POST /search/cases` | as search |
+| `create_watchlist`, `get_watchlist`, `update_watchlist`, `delete_watchlist` | `/watchlists` | 0 |
+| `list_watchlists` / `iter_watchlists` | `GET /watchlists` | 0 |
+| `add_watchlist_items`, `remove_watchlist_item` | `/watchlists/{id}/items` | 0 |
+| `list_watchlist_items` / `iter_watchlist_items` | `GET /watchlists/{id}/items` | 0 |
+| `list_changes` / `iter_changes` | `GET /changes` | 1 per non-empty page |
+| `list_watchlist_events` / `iter_watchlist_events` | `GET /watchlists/{id}/events` | 1 per non-empty page |
+| `create_webhook`, `get_webhook`, `update_webhook`, `delete_webhook`, `rotate_webhook_secret`, `test_webhook` | `/webhooks` | 0 |
+| `list_webhooks` / `iter_webhooks` | `GET /webhooks` | 0 |
+| `list_webhook_deliveries` / `iter_webhook_deliveries`, `retry_webhook_delivery` | `/webhooks/{id}/deliveries` | 0 |
+
+The `iter_*` helpers yield individual items; the `list_*` methods return a
+`CursorListResult` with `.data`, `.pagination` and `.next_cursor`.
+
+Watch caps per account: Free 10, Pay As You Go 1,000, Scale 10,000,
+Enterprise by contract. New error codes surface as typed exceptions with
+`code` set: `INVALID_CNR`, `WATCHLIST_NOT_FOUND`, `WEBHOOK_NOT_FOUND`,
+`DELIVERY_NOT_FOUND`, `WATCH_CAP_EXCEEDED`, `WATCHLIST_LIMIT_REACHED`,
+`WEBHOOK_LIMIT_REACHED`, `INVALID_WEBHOOK_URL`. API keys need the
+`monitoring:read` and `monitoring:write` scopes (keys without explicit
+scopes have full access).
 
 ## Pagination
 
@@ -526,46 +655,9 @@ cd courtmesh-python
 
 No network calls are made in the test suite, all HTTP is mocked.
 
-## Publishing
+## Releasing
 
-These are the exact commands a human runs to push this SDK to GitHub and
-publish it to PyPI. Nothing here is automated by the SDK itself.
-
-### 1. Push to GitHub
-
-```bash
-cd courtmesh-python
-git remote add origin git@github.com:courtmesh/courtmesh-python.git
-git push -u origin main
-```
-
-### 2. Build the release artifacts
-
-```bash
-python -m pip install --upgrade build twine
-python -m build
-```
-
-This produces `dist/courtmesh-0.4.1.tar.gz` and `dist/courtmesh-0.4.1-py3-none-any.whl`.
-
-### 3. Check the build
-
-```bash
-python -m twine check dist/*
-```
-
-### 4. Upload to PyPI
-
-```bash
-python -m twine upload dist/*
-```
-
-Twine will prompt for your PyPI username (use `__token__`) and an API token.
-To upload to TestPyPI first instead:
-
-```bash
-python -m twine upload --repository testpypi dist/*
-```
+Maintainers: see [RELEASING.md](RELEASING.md).
 
 ## License
 

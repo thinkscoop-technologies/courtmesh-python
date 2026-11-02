@@ -1180,3 +1180,143 @@ class PartyScreenBatchMeta(TypedDict, total=False):
     requestId: str
     truncated: bool
     truncatedReason: str
+
+
+# ---------------------------------------------------------------------------
+# CNR lookup, watchlists, change feed and webhooks (0.5.0)
+# ---------------------------------------------------------------------------
+
+
+class CursorPagination(TypedDict, total=False):
+    """Pagination block of the monitoring list endpoints. `nextCursor` is
+    returned even on an empty `/changes` page so a client can poll forward."""
+
+    nextCursor: Optional[str]
+    hasMore: bool
+    limit: int
+
+
+@dataclass
+class CursorListResult(Generic[T]):
+    """One page of a monitoring list endpoint."""
+
+    data: List[T]
+    pagination: CursorPagination
+    meta: Dict[str, Any]
+    #: See `APIResponse.request_id`.
+    request_id: Optional[str] = None
+
+    @property
+    def next_cursor(self) -> Optional[str]:
+        return self.pagination.get("nextCursor")
+
+
+class CnrLookup(TypedDict, total=False):
+    """`data` of `GET /cases/by-cnr/{cnr}`. `status` is `found`, `pending` or `not_found`."""
+
+    cnr: str
+    status: str
+    case: Optional[Dict[str, Any]]
+    requestId: Optional[str]
+
+
+class WatchlistItemInput(TypedDict, total=False):
+    cnr: str
+    reference: str
+    label: str
+
+
+class Watchlist(TypedDict, total=False):
+    id: str
+    name: str
+    itemCount: int
+    createdAt: str
+    updatedAt: str
+    metadata: Optional[Dict[str, Any]]
+
+
+class WatchItemResult(TypedDict, total=False):
+    """Outcome of adding one CNR. `result` is `watching`, `pending`,
+    `invalid`, `duplicate`, `cap_exceeded` or `not_found`."""
+
+    cnr: str
+    result: str
+    message: str
+
+
+class WatchSnapshot(TypedDict, total=False):
+    caseStatus: Optional[str]
+    caseStage: Optional[str]
+    nextHearingDate: Optional[str]
+    lastListedOn: Optional[str]
+    orderCount: Optional[int]
+    latestOrderDate: Optional[str]
+    disposalNature: Optional[str]
+
+
+class WatchlistItem(TypedDict, total=False):
+    """`status` is `watching`, `pending`, `not_found` or `error`."""
+
+    cnr: str
+    reference: Optional[str]
+    label: Optional[str]
+    status: str
+    caseId: Optional[str]
+    court: Optional[str]
+    title: Optional[str]
+    lastCheckedAt: Optional[str]
+    lastChangedAt: Optional[str]
+    snapshot: Optional[WatchSnapshot]
+    addedAt: str
+
+
+class ChangeEventWatchlistRef(TypedDict, total=False):
+    id: str
+    reference: Optional[str]
+
+
+class ChangeEvent(TypedDict, total=False):
+    """One change event. The feed and the webhook body are identical.
+
+    `type` is one of `case.tracking_started`, `case.order_added`,
+    `case.hearing_date_changed`, `case.status_changed`,
+    `case.stage_changed`, `case.disposed`, `case.not_found` or
+    `webhook.test`. Dedupe on `id`: delivery is at least once.
+    """
+
+    id: str
+    type: str
+    createdAt: str
+    cnr: str
+    caseId: Optional[str]
+    watchlists: List[ChangeEventWatchlistRef]
+    data: Dict[str, Any]
+
+
+class Webhook(TypedDict, total=False):
+    id: str
+    url: str
+    events: List[str]
+    watchlistIds: Optional[List[str]]
+    description: Optional[str]
+    enabled: bool
+    disabledReason: Optional[str]
+    createdAt: str
+    updatedAt: str
+    #: Present only on create and rotate. Shown once.
+    secret: str
+
+
+class WebhookDelivery(TypedDict, total=False):
+    """`status` is `pending`, `succeeded` or `failed`."""
+
+    id: str
+    eventId: str
+    eventType: str
+    status: str
+    attempts: int
+    lastAttemptAt: Optional[str]
+    nextAttemptAt: Optional[str]
+    lastResponseStatus: Optional[int]
+    lastError: Optional[str]
+    createdAt: str

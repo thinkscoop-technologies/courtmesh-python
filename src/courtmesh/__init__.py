@@ -29,6 +29,12 @@ from .errors import (
     build_error,
     is_retryable_429_code,
 )
+from .monitoring import (
+    WebhookSignatureError,
+    assert_cnr,
+    normalize_cnr,
+    verify_webhook_signature,
+)
 from .models import (
     APIResponse,
     AnalysisArguments,
@@ -47,7 +53,10 @@ from .models import (
     CaseDetailsMetadata,
     CaseListItem,
     CaseTypeEntry,
+    ChangeEvent,
+    ChangeEventWatchlistRef,
     CitedCases,
+    CnrLookup,
     ConsolidatedAnalysis,
     ConsolidatedAnalyzeResponse,
     CourtHierarchy,
@@ -58,6 +67,8 @@ from .models import (
     CoverageData,
     CoverageDistrictCourts,
     CoverageMeta,
+    CursorListResult,
+    CursorPagination,
     Envelope,
     HealthCheckEntry,
     HealthCheckResult,
@@ -108,6 +119,13 @@ from .models import (
     UsagePeriod,
     UsageTierLimits,
     UsageWalletOwner,
+    WatchItemResult,
+    WatchSnapshot,
+    Watchlist,
+    WatchlistItem,
+    WatchlistItemInput,
+    Webhook,
+    WebhookDelivery,
 )
 
 __all__ = [
@@ -211,4 +229,21 @@ __all__ = [
     "PartyScreenBatchMeta",
     "HealthCheckResult",
     "HealthCheckEntry",
+    # monitoring (0.5.0)
+    "normalize_cnr",
+    "assert_cnr",
+    "verify_webhook_signature",
+    "WebhookSignatureError",
+    "CursorPagination",
+    "CursorListResult",
+    "CnrLookup",
+    "WatchlistItemInput",
+    "Watchlist",
+    "WatchItemResult",
+    "WatchSnapshot",
+    "WatchlistItem",
+    "ChangeEvent",
+    "ChangeEventWatchlistRef",
+    "Webhook",
+    "WebhookDelivery",
 ]

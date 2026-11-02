@@ -115,7 +115,7 @@ class HTTPTransport:
         method: str,
         path: str,
         params: Optional[Dict[str, Any]] = None,
-        json_body: Optional[Dict[str, Any]] = None,
+        json_body: Optional[Any] = None,
         require_auth: bool = True,
         timeout: Optional[float] = None,
         retry_posts: Optional[bool] = None,
@@ -142,10 +142,11 @@ class HTTPTransport:
         effective_retry_posts = self.retry_posts if retry_posts is None else retry_posts
         # R3: a POST is only retried after it has reached the network (a
         # connection/timeout error, or a 502/503/504 response) when this
-        # call, or the client, opted in. A 429 is not gated by this - see
+        # call, or the client, opted in (GET and DELETE are idempotent and
+        # are retried by default; PATCH follows the POST rule). A 429 is not gated by this - see
         # below, it is a pre-flight refusal, not evidence the request was
         # ever processed.
-        can_retry_after_dispatch = method.upper() == "GET" or effective_retry_posts
+        can_retry_after_dispatch = method.upper() in ("GET", "DELETE") or effective_retry_posts
 
         attempt = 0
         while True:
