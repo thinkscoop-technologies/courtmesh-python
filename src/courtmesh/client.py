@@ -1125,14 +1125,20 @@ class CourtMesh:
 
         1 credit, charged only when a record is returned. `result.data["status"]`
         is `found` (200, `result.data["case"]` holds the record) or `pending`
-        (202, a live fetch is running: poll this same call, or `get_timeline`
-        with `result.data["requestId"]`). A CNR that is not in the corpus and
-        was not fetched raises `NotFoundError` (`code == "CASE_NOT_FOUND"`).
+        (202, a live fetch is running: poll this same call with the same CNR;
+        `result.data["requestId"]` is opaque and is not accepted by
+        `get_timeline`). A CNR that is not in the corpus and was not fetched
+        raises `NotFoundError` (`code == "CASE_NOT_FOUND"`). A Supreme Court
+        CNR that is not in the corpus cannot be fetched live and raises it
+        straight away.
 
         Args:
             fetch: start a live court portal fetch for a CNR we do not hold
-                yet. 1 credit once the fetch is accepted; shares the daily
-                live fetch cap with `request_timeline(refresh=True)`.
+                yet. The call that starts the fetch returns `pending` and is
+                free; the poll that returns the record is the one 1 credit
+                charge, and a fetch the court portal cannot satisfy costs
+                nothing. Shares the daily live fetch cap with
+                `request_timeline(refresh=True)`.
         """
         path = "/cases/by-cnr/{}".format(quote(cnr_for_request(cnr), safe=""))
         response = self._transport.request("GET", path, params={"fetch": "true"} if fetch else None, timeout=timeout)
@@ -1409,7 +1415,7 @@ class CourtMesh:
         retry_posts: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> APIResponse[WebhookDelivery]:
-        """Send a `webhook.test` event to the endpoint now and return the delivery attempt result."""
+        """Send a `webhook.test` event to the endpoint now (a single attempt, never retried) and return the delivery object."""
         path = "/webhooks/{}/test".format(_seg(webhook_id))
         return self._post(path, None, timeout, retry_posts, idempotency_key)
 

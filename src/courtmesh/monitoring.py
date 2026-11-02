@@ -24,7 +24,7 @@ def normalize_cnr(value: Any) -> Optional[str]:
     """Normalise a CNR the way the server does.
 
     Trims, uppercases, removes spaces, hyphens, slashes, dots and colons, and
-    drops a leading ``CNR``, ``CNR:`` or ``CNR NO`` label. Returns the
+    drops a leading ``CNR``, ``CNR:``, ``CNR NO`` or ``CNR NUMBER`` label. Returns the
     canonical 16 character form, or ``None`` when the input cannot be a CNR.
     The server is the authority; this lets you validate input before
     spending a request.
@@ -36,7 +36,9 @@ def normalize_cnr(value: Any) -> Optional[str]:
         return None
     text = _CNR_SEPARATORS.sub("", value.strip().upper())
     if not _CNR_PATTERN.match(text):
-        if text.startswith("CNRNO"):
+        if text.startswith("CNRNUMBER"):
+            text = text[9:]
+        elif text.startswith("CNRNO"):
             text = text[5:]
         elif text.startswith("CNR"):
             text = text[3:]

@@ -304,6 +304,19 @@ class CaseDetails(TypedDict, total=False):
     respondents: List[str]
     decisionDate: str
     disposalNature: str
+    #: Canonical 16 character CNR when the court published one.
+    cnr: str
+    courtName: str
+    courtType: str
+    caseYear: Union[int, str]
+    registrationDate: str
+    #: Where the case stands, for example "Pending" or "Disposed".
+    caseStatus: str
+    caseStage: str
+    #: YYYY-MM-DD.
+    nextHearingDate: str
+    lastListedOn: str
+    orderCount: int
     summary: str
     metadata: CaseDetailsMetadata
     hasDocuments: bool
@@ -1212,7 +1225,8 @@ class CursorListResult(Generic[T]):
 
 
 class CnrLookup(TypedDict, total=False):
-    """`data` of `GET /cases/by-cnr/{cnr}`. `status` is `found`, `pending` or `not_found`."""
+    """`data` of `GET /cases/by-cnr/{cnr}`. `status` is `found` or `pending` in a success body
+    (`not_found` surfaces as `NotFoundError`). `requestId` is opaque: poll the same call, not `get_timeline`."""
 
     cnr: str
     status: str
@@ -1301,6 +1315,8 @@ class Webhook(TypedDict, total=False):
     description: Optional[str]
     enabled: bool
     disabledReason: Optional[str]
+    #: True for 24 hours after a secret rotation, while both secrets sign.
+    secretRotating: bool
     createdAt: str
     updatedAt: str
     #: Present only on create and rotate. Shown once.

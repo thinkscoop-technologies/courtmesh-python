@@ -342,6 +342,8 @@ normalize_cnr("CNR: DLHC-01-008421-2021")  # "DLHC010084212021", or None if it c
 
 with CourtMesh(api_key=os.environ["COURTMESH_API_KEY"]) as cm:
     # One-off lookup. fetch=True starts a live fetch for a CNR we do not hold yet.
+    # The starting call returns "pending" and is free; poll the same call (same CNR) until "found".
+    # A CNR we do not hold and did not fetch raises NotFoundError (CASE_NOT_FOUND).
     lookup = cm.get_case_by_cnr("DLHC010084212021", fetch=True)
     print(lookup.data["status"])  # "found" | "pending"
 
@@ -433,7 +435,7 @@ Failed deliveries are retried after 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and
 
 | Method | Endpoint | Credits |
 |---|---|---|
-| `get_case_by_cnr(cnr, fetch=False)` | `GET /cases/by-cnr/{cnr}` | 1 when a record is returned |
+| `get_case_by_cnr(cnr, fetch=False)` | `GET /cases/by-cnr/{cnr}` | 1 when a record is returned (`pending` and `not_found` are free; with `fetch`, the starting call is free and the poll that returns the record is the one charge) |
 | `search_cases(cnr=...)` | `POST /search/cases` | as search |
 | `create_watchlist`, `get_watchlist`, `update_watchlist`, `delete_watchlist` | `/watchlists` | 0 |
 | `list_watchlists` / `iter_watchlists` | `GET /watchlists` | 0 |
@@ -448,11 +450,21 @@ Failed deliveries are retried after 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and
 The `iter_*` helpers yield individual items; the `list_*` methods return a
 `CursorListResult` with `.data`, `.pagination` and `.next_cursor`.
 
-Watch caps per account: Free 10, Pay As You Go 1,000, Scale 10,000,
-Enterprise by contract. New error codes surface as typed exceptions with
+Watch caps per account (across all watchlists): Free 10, Pay As You Go 1,000,
+Scale 10,000, Enterprise by contract. Adding CNRs we do not hold yet starts a
+live fetch, so there is also a daily limit on those: Free 20, Pay As You Go
+500, Scale 5,000, Enterprise unlimited; items over it come back as
+`cap_exceeded`. A Supreme Court CNR we do not hold comes back `not_found` at
+once, and `not_found` items still count toward the cap until removed. At most
+50 watchlists and 10 webhook endpoints per account. `WATCH_CAP_EXCEEDED`
+(403) is raised only when the cap is already full and you sent a new CNR.
+Webhook delivery history is kept 30 days and events 90 days; an event appears
+in the feed about 2 seconds after it is created. `test_webhook` makes one
+attempt and never retries. New error codes surface as typed exceptions with
 `code` set: `INVALID_CNR`, `WATCHLIST_NOT_FOUND`, `WEBHOOK_NOT_FOUND`,
 `DELIVERY_NOT_FOUND`, `WATCH_CAP_EXCEEDED`, `WATCHLIST_LIMIT_REACHED`,
-`WEBHOOK_LIMIT_REACHED`, `INVALID_WEBHOOK_URL`. API keys need the
+`WEBHOOK_LIMIT_REACHED`, `INVALID_WEBHOOK_URL`, `ITEM_NOT_FOUND` (removing a
+CNR that is not in the list). API keys need the
 `monitoring:read` and `monitoring:write` scopes (keys without explicit
 scopes have full access).
 
