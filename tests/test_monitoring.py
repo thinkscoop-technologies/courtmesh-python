@@ -7,6 +7,7 @@ from helpers import FakeResponse
 
 from courtmesh import (
     NotFoundError,
+    ValidationError,
     WebhookSignatureError,
     assert_cnr,
     normalize_cnr,
@@ -405,3 +406,56 @@ def test_uses_system_clock_by_default():
     assert verify_webhook_signature(body, "t={},v1={}".format(t, sig), "whsec_x")["id"] == "evt_1"
     with pytest.raises(WebhookSignatureError):
         verify_webhook_signature(VECTOR["rawBody"], HEADER, VECTOR["secret"])
+
+
+# -- final server behaviour -------------------------------------------------
+
+
+def test_unavailable_item_has_null_case_fields(make_client):
+    client, mock = make_client()
+    item = {
+        "cnr": CNR, "reference": "R1", "label": None, "status": "unavailable",
+        "caseId": None, "court": None, "title": None, "lastCheckedAt": None,
+        "lastChangedAt": None, "snapshot": None, "addedAt": "2026-11-02T00:00:00.000Z",
+    }
+    mock.return_value = page([item], None)
+    res = client.list_watchlist_items("wl_1", status="unavailable")
+    assert call(mock)[2]["params"]["status"] == "unavailable"
+    assert res.data[0]["status"] == "unavailable"
+    assert res.data[0]["snapshot"] is None
+
+
+def test_cap_exceeded_and_cooldown_not_found_are_data(make_client):
+    client, mock = make_client()
+    mock.return_value = ok(
+        {
+            "results": [
+                {"cnr": CNR, "result": "cap_exceeded", "message": "The daily limit for adding case numbers has been reached. It resets at midnight IST."},
+                {"cnr": "DLHC010084212022", "result": "not_found", "message": "eCourts had no such case when we last looked. Try again tomorrow."},
+            ],
+            "itemCount": 3,
+        }
+    )
+    res = client.add_watchlist_items("wl_1", [{"cnr": CNR}, {"cnr": "DLHC010084212022"}])
+    assert [r["result"] for r in res.data["results"]] == ["cap_exceeded", "not_found"]
+
+
+def test_fetch_true_in_cooldown_raises_not_found(make_client):
+    client, mock = make_client()
+    mock.return_value = FakeResponse(
+        404, {"success": False, "error": "No case with this CNR was found.", "code": "CASE_NOT_FOUND", "cnr": CNR, "status": "not_found"}
+    )
+    with pytest.raises(NotFoundError) as info:
+        client.get_case_by_cnr(CNR, fetch=True)
+    assert info.value.code == "CASE_NOT_FOUND"
+
+
+def test_query_validation_details_are_path_message_strings(make_client):
+    client, mock = make_client()
+    details = ["limit: limit cannot exceed 100."]
+    mock.return_value = FakeResponse(
+        400, {"success": False, "error": "Validation failed. Please check your request and try again.", "code": "VALIDATION_ERROR", "details": details}
+    )
+    with pytest.raises(ValidationError) as info:
+        client.list_changes(limit=500)
+    assert info.value.response_body["details"] == details

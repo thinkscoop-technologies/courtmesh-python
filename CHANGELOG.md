@@ -30,6 +30,12 @@ Adds CNR lookup and case monitoring (API docs 1.3.0).
 - `search_cases` takes `query` as optional (required unless `cnr` is set).
 - `User-Agent` is `courtmesh-python/0.5.0`.
 - Project URLs now point at `github.com/thinkscoop-technologies/courtmesh-python`.
+- `WatchlistItem.status` gains `unavailable` (a case taken down at a party's request: `caseId`, `court`, `title`, `snapshot`, `lastCheckedAt` and `lastChangedAt` are `None`, no events are sent). Adding a taken down CNR returns `not_found`.
+- Documented the daily add allowance per account (Free 50, Pay As You Go 5,000, Scale 50,000, Enterprise 500,000) on top of the daily limit on new CNRs; both report `cap_exceeded`. The watch cap counts distinct CNRs across all lists.
+- Documented the 24 hour cooldown after the court portal has nothing for a CNR: watchlist adds return `not_found` and `get_case_by_cnr(..., fetch=True)` raises `NotFoundError` without a new fetch.
+- Documented that `search_cases(cnr=...)` returns one ordinary search hit, that `case.tracking_started` is sent after the first fresh refresh, that a burst announces the newest 20 orders and never orders dated more than 7 days before watching began, that feed cursors are opaque and `since` is converted once, and that dates are `YYYY-MM-DD` with 9999 meaning no date.
+- Documented webhook behaviour: `test_webhook` is sent even to a disabled endpoint, 10 second deadline and 64 KB read per attempt, never attempted deliveries older than 24 hours are `failed` with `lastError: "expired"`, a webhook created without `events` echoes the full default `case.*` list, and `watchlist_ids=[]` means all lists. `create_webhook` honours `idempotency_key`.
+- Validation error `details` is a list of `"path: message"` strings for query and body alike.
 
 ## [0.4.1]
 

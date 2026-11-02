@@ -1226,7 +1226,8 @@ class CursorListResult(Generic[T]):
 
 class CnrLookup(TypedDict, total=False):
     """`data` of `GET /cases/by-cnr/{cnr}`. `status` is `found` or `pending` in a success body
-    (`not_found` surfaces as `NotFoundError`). `requestId` is opaque: poll the same call, not `get_timeline`."""
+    (`not_found` surfaces as `NotFoundError`). `requestId` is opaque: poll the same call, not `get_timeline`.
+    When this comes from `search_cases(cnr=...)` instead, it is one ordinary search hit, not this shape."""
 
     cnr: str
     status: str
@@ -1251,7 +1252,14 @@ class Watchlist(TypedDict, total=False):
 
 class WatchItemResult(TypedDict, total=False):
     """Outcome of adding one CNR. `result` is `watching`, `pending`,
-    `invalid`, `duplicate`, `cap_exceeded` or `not_found`."""
+    `invalid`, `duplicate`, `cap_exceeded` or `not_found`.
+
+    `cap_exceeded` covers your watched CNR cap, the daily limit on adding
+    CNRs we do not hold yet, and the daily add allowance per account (Free 50,
+    Pay As You Go 5,000, Scale 50,000, Enterprise 500,000 per Indian calendar
+    day); `message` says which. `not_found` also covers a case taken down at a
+    party's request and a CNR the court portal had nothing for in the last 24
+    hours (nothing is refetched until that cooldown passes)."""
 
     cnr: str
     result: str
@@ -1259,6 +1267,9 @@ class WatchItemResult(TypedDict, total=False):
 
 
 class WatchSnapshot(TypedDict, total=False):
+    """Dates are `YYYY-MM-DD` (Indian calendar). A court's year 9999 "no date"
+    comes back as `None`."""
+
     caseStatus: Optional[str]
     caseStage: Optional[str]
     nextHearingDate: Optional[str]
@@ -1269,7 +1280,11 @@ class WatchSnapshot(TypedDict, total=False):
 
 
 class WatchlistItem(TypedDict, total=False):
-    """`status` is `watching`, `pending`, `not_found` or `error`."""
+    """`status` is `watching`, `pending`, `not_found`, `error` or `unavailable`.
+
+    `unavailable` means the case was taken down at a party's request: no events
+    are sent for it, and `caseId`, `court`, `title`, `snapshot`,
+    `lastCheckedAt` and `lastChangedAt` are all `None`."""
 
     cnr: str
     reference: Optional[str]
@@ -1296,6 +1311,12 @@ class ChangeEvent(TypedDict, total=False):
     `case.hearing_date_changed`, `case.status_changed`,
     `case.stage_changed`, `case.disposed`, `case.not_found` or
     `webhook.test`. Dedupe on `id`: delivery is at least once.
+
+    `case.tracking_started` arrives once the first fresh refresh of the case
+    completes (immediately when the stored record is already current), not at
+    the moment of the add. After that, a burst of new orders announces only
+    the newest 20, and an order dated more than 7 days before you started
+    watching is never announced to you. A taken down case sends no events.
     """
 
     id: str
@@ -1324,7 +1345,9 @@ class Webhook(TypedDict, total=False):
 
 
 class WebhookDelivery(TypedDict, total=False):
-    """`status` is `pending`, `succeeded` or `failed`."""
+    """`status` is `pending`, `succeeded` or `failed`. `lastError` is
+    `"expired"` on a delivery that was never attempted for 24 hours and was
+    marked `failed` instead of being sent."""
 
     id: str
     eventId: str

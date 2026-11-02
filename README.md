@@ -343,7 +343,8 @@ normalize_cnr("CNR: DLHC-01-008421-2021")  # "DLHC010084212021", or None if it c
 with CourtMesh(api_key=os.environ["COURTMESH_API_KEY"]) as cm:
     # One-off lookup. fetch=True starts a live fetch for a CNR we do not hold yet.
     # The starting call returns "pending" and is free; poll the same call (same CNR) until "found".
-    # A CNR we do not hold and did not fetch raises NotFoundError (CASE_NOT_FOUND).
+    # A CNR we do not hold and did not fetch raises NotFoundError (CASE_NOT_FOUND). So does fetch=True
+    # for a CNR the court portal had nothing for in the last 24 hours: it is not asked again until that passes.
     lookup = cm.get_case_by_cnr("DLHC010084212021", fetch=True)
     print(lookup.data["status"])  # "found" | "pending"
 
@@ -427,16 +428,28 @@ the header (two during a 24 hour secret rotation). Pass a list of secrets to
 cover your side of a rotation. It returns the parsed event or raises
 `WebhookSignatureError` (`exc.reason` says why).
 
-Failed deliveries are retried after 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and
-24 h. Use `list_webhook_deliveries(id)` to inspect attempts and
+Each attempt has a 10 second deadline and reads at most 64 KB of your
+response. Failed deliveries are retried after 1 min, 5 min, 30 min, 2 h, 6 h,
+12 h and 24 h. A delivery that could not be attempted within 24 hours is
+marked `failed` with `lastError: "expired"` instead of being sent. Use `list_webhook_deliveries(id)` to inspect attempts and
 `retry_webhook_delivery(id, delivery_id)` to re-send one.
+
+### What the change feed sends
+
+- Dates are `YYYY-MM-DD` on the Indian calendar. A court's year 9999 "no date" is returned as `None`.
+- `case.tracking_started` is sent once the first fresh refresh of the case completes, carrying the fresh snapshot, not at the moment you add the CNR (a record that is already current sends it at add time). A CNR we fetched live for you sends it as soon as the case lands.
+- A burst of new orders announces only the newest 20, oldest first. An order dated more than 7 days before you started watching is never announced.
+- A case taken down at a party's request shows as an `unavailable` item (`caseId`, `court`, `title`, `snapshot`, `lastCheckedAt` and `lastChangedAt` are `None`) and sends no events. Adding a CNR that is already taken down returns `not_found`.
+- Cursors are opaque and ordered by an internal sequence. `since` is converted to a position once; keep using the `nextCursor` you get back.
+- A webhook created without `events` echoes the full default `case.*` list; `watchlist_ids=[]` means all lists. `create_webhook` honours `idempotency_key`, and `test_webhook` is sent even to a switched off endpoint.
+- A 400 validation error carries `details` as a list of `"path: message"` strings in `exc.response_body["details"]`, for query and body alike.
 
 ### Monitoring methods
 
 | Method | Endpoint | Credits |
 |---|---|---|
 | `get_case_by_cnr(cnr, fetch=False)` | `GET /cases/by-cnr/{cnr}` | 1 when a record is returned (`pending` and `not_found` are free; with `fetch`, the starting call is free and the poll that returns the record is the one charge) |
-| `search_cases(cnr=...)` | `POST /search/cases` | as search |
+| `search_cases(cnr=...)` | `POST /search/cases` | as search (returns one ordinary search hit; progress fields and `orderCount` are only on `get_case_by_cnr`) |
 | `create_watchlist`, `get_watchlist`, `update_watchlist`, `delete_watchlist` | `/watchlists` | 0 |
 | `list_watchlists` / `iter_watchlists` | `GET /watchlists` | 0 |
 | `add_watchlist_items`, `remove_watchlist_item` | `/watchlists/{id}/items` | 0 |
@@ -450,12 +463,20 @@ Failed deliveries are retried after 1 min, 5 min, 30 min, 2 h, 6 h, 12 h and
 The `iter_*` helpers yield individual items; the `list_*` methods return a
 `CursorListResult` with `.data`, `.pagination` and `.next_cursor`.
 
-Watch caps per account (across all watchlists): Free 10, Pay As You Go 1,000,
-Scale 10,000, Enterprise by contract. Adding CNRs we do not hold yet starts a
-live fetch, so there is also a daily limit on those: Free 20, Pay As You Go
-500, Scale 5,000, Enterprise unlimited; items over it come back as
-`cap_exceeded`. A Supreme Court CNR we do not hold comes back `not_found` at
-once, and `not_found` items still count toward the cap until removed. At most
+Watch caps per account (distinct CNRs across all watchlists, so the same CNR
+on two lists uses one slot): Free 10, Pay As You Go 1,000, Scale 10,000,
+Enterprise by contract. Two daily limits apply to adding, counted per Indian
+calendar day, and items over either come back as `cap_exceeded` with a
+message: every add that results in a watched or pending item counts toward a
+daily add allowance (Free 50, Pay As You Go 5,000, Scale 50,000, Enterprise
+500,000), and adding CNRs we do not hold yet starts a live fetch, so those
+also have their own daily limit (Free 20, Pay As You Go 500, Scale 5,000,
+Enterprise unlimited). A Supreme Court CNR we do not hold comes back
+`not_found` at once. If the court portal had nothing for a CNR in the last 24
+hours, adding it again is `not_found` with a message and starts no new fetch
+(the same cooldown makes `get_case_by_cnr(..., fetch=True)` raise
+`NotFoundError`). `not_found`, `error` and `unavailable` items still count
+toward the cap until removed. At most
 50 watchlists and 10 webhook endpoints per account. `WATCH_CAP_EXCEEDED`
 (403) is raised only when the cap is already full and you sent a new CNR.
 Webhook delivery history is kept 30 days and events 90 days; an event appears

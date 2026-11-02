@@ -274,7 +274,10 @@ class CourtMesh:
                 `cnr` is given.
             cnr: exact CNR match (no fuzzy text matching). Any common
                 spelling is accepted and normalised to the canonical 16
-                characters before sending. When present, `query` is optional.
+                characters before sending. When present, `query` is optional
+                and ignored. The result is one ordinary search hit (or an
+                empty list), not the full record: progress fields and
+                `orderCount` are only on `get_case_by_cnr`.
             court, caseType, judgeName, judges, judge: a single string or a
                 list of strings. `judgeName`, `judges` and `judge` are
                 aliases for the same filter, the handler uses
@@ -1138,7 +1141,9 @@ class CourtMesh:
                 free; the poll that returns the record is the one 1 credit
                 charge, and a fetch the court portal cannot satisfy costs
                 nothing. Shares the daily live fetch cap with
-                `request_timeline(refresh=True)`.
+                `request_timeline(refresh=True)`. If the court portal had
+                nothing for this CNR in the last 24 hours, no new fetch is
+                started and the call raises `NotFoundError` immediately.
         """
         path = "/cases/by-cnr/{}".format(quote(cnr_for_request(cnr), safe=""))
         response = self._transport.request("GET", path, params={"fetch": "true"} if fetch else None, timeout=timeout)
@@ -1210,6 +1215,12 @@ class CourtMesh:
         """Add 1 to 100 CNRs. Each gets a result in `result.data["results"]`:
         `watching`, `pending` (not in the corpus yet, so a live fetch was
         started), `invalid`, `duplicate`, `cap_exceeded` or `not_found`.
+
+        `cap_exceeded` also means you passed the daily add allowance for the
+        account (Free 50, Pay As You Go 5,000, Scale 50,000, Enterprise
+        500,000 per Indian calendar day) or the daily limit on new CNRs.
+        `not_found` is returned for a case taken down at a party's request and
+        for a CNR the court portal had nothing for in the last 24 hours.
 
         Each item is a dict like `{"cnr": "...", "reference": "LOAN-42", "label": "..."}`.
         """
@@ -1345,7 +1356,9 @@ class CourtMesh:
         `result.data["secret"]` is shown once, here and on
         `rotate_webhook_secret`: store it. Use it with
         `verify_webhook_signature`. `events` defaults to every `case.*`
-        type; `watchlist_ids` defaults to all watchlists.
+        type and the response echoes the full list; `watchlist_ids` defaults
+        to all watchlists (the response echoes `[]`, which also means all).
+        Honours `idempotency_key`.
         """
         payload = _compact(
             url=url,
@@ -1415,7 +1428,11 @@ class CourtMesh:
         retry_posts: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> APIResponse[WebhookDelivery]:
-        """Send a `webhook.test` event to the endpoint now (a single attempt, never retried) and return the delivery object."""
+        """Send a `webhook.test` event to the endpoint now (a single attempt, never retried) and return the delivery object.
+
+        It is sent even if the endpoint is switched off, and does not count
+        toward its failure streak. Each attempt has a hard 10 second deadline
+        and reads at most 64 KB of your response."""
         path = "/webhooks/{}/test".format(_seg(webhook_id))
         return self._post(path, None, timeout, retry_posts, idempotency_key)
 
