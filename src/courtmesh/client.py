@@ -19,6 +19,11 @@ from .models import (
     AuditResult,
     CaseAnalysisResponse,
     CaseDetails,
+    CaseDocuments,
+    CaseDocumentText,
+    CnrRefreshBatch,
+    CnrRefreshResult,
+    CnrRefreshState,
     CaseTypeEntry,
     ChangeEvent,
     CnrLookup,
@@ -97,6 +102,10 @@ def _changes_params(
         cnr=cnr_for_request(cnr) if cnr is not None else None,
         limit=limit,
     )
+
+
+def _include_params(include: Optional[Sequence[str]]) -> Optional[Dict[str, str]]:
+    return {"include": ",".join(include)} if include else None
 
 
 def _generate_idempotency_key() -> str:
@@ -554,15 +563,22 @@ class CourtMesh:
 
     # -- 4. GET /cases/{id} -------------------------------------------------
 
-    def get_case(self, case_id: str, timeout: Optional[float] = None) -> APIResponse[CaseDetails]:
+    def get_case(
+        self, case_id: str, timeout: Optional[float] = None, include: Optional[Sequence[str]] = None
+    ) -> APIResponse[CaseDetails]:
         """Fetch case details by Mongo ObjectId or caseNumber.
 
         The server tries an ObjectId lookup first and falls back to a
         caseNumber lookup. The response deliberately excludes analysis
         fields, use `get_case_analysis` for those.
+
+        Pass `include=["hearings", "advocates"]` for hearing history and
+        advocates, at no extra charge. Either can come back None when we hold
+        no such record for this case, and empty when we hold it and it lists
+        none.
         """
         path = "/cases/{}".format(quote(str(case_id), safe=""))
-        response = self._transport.request("GET", path, timeout=timeout)
+        response = self._transport.request("GET", path, params=_include_params(include), timeout=timeout)
         body = self._transport.parse_envelope(response)
         return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
@@ -1122,7 +1138,7 @@ class CourtMesh:
             cursor = next_cursor
 
     def get_case_by_cnr(
-        self, cnr: str, fetch: bool = False, timeout: Optional[float] = None
+        self, cnr: str, fetch: bool = False, timeout: Optional[float] = None, include: Optional[Sequence[str]] = None
     ) -> APIResponse[CnrLookup]:
         """Look a case up by CNR (any common spelling, normalised for you).
 
@@ -1144,10 +1160,85 @@ class CourtMesh:
                 `request_timeline(refresh=True)`. If the court portal had
                 nothing for this CNR in the last 24 hours, no new fetch is
                 started and the call raises `NotFoundError` immediately.
+            include: `hearings`, `advocates`, as on `get_case`.
         """
         path = "/cases/by-cnr/{}".format(quote(cnr_for_request(cnr), safe=""))
-        response = self._transport.request("GET", path, params={"fetch": "true"} if fetch else None, timeout=timeout)
+        params = {**({"fetch": "true"} if fetch else {}), **(_include_params(include) or {})}
+        response = self._transport.request("GET", path, params=params or None, timeout=timeout)
         return self._envelope(response)
+
+    def list_case_orders(self, case_id: str, timeout: Optional[float] = None) -> APIResponse[CaseDocuments]:
+        """List the documents we hold for a case, newest first, with what is available for each.
+
+        Read `textAvailable` before asking for the text: not every order has
+        readable text. 1 credit.
+        """
+        path = "/cases/{}/orders".format(quote(str(case_id), safe=""))
+        return self._envelope(self._transport.request("GET", path, timeout=timeout))
+
+    def get_case_document_text(
+        self, case_id: str, document_id: str, timeout: Optional[float] = None
+    ) -> APIResponse[CaseDocumentText]:
+        """Read the stored text of one document of a case.
+
+        2 credits when text is returned; when we hold none, `textAvailable` is
+        False, `text` is None and the call is free. Calls that return text
+        count against a monthly allowance (`ORDER_TEXT_LIMIT_REACHED`). The
+        text is machine read from the court document, so check anything you
+        rely on against the original. Taken down and masked matters raise
+        `PermissionDeniedError` (`CASE_RESTRICTED`).
+        """
+        path = "/cases/{}/orders/{}/text".format(quote(str(case_id), safe=""), quote(str(document_id), safe=""))
+        return self._envelope(self._transport.request("GET", path, timeout=timeout))
+
+    def refresh_case_by_cnr(
+        self,
+        cnr: str,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[CnrRefreshResult]:
+        """Queue a fresh read from the court and answer at once.
+
+        A CNR we do not hold yet is fetched too. `status == "queued"` costs 1
+        credit, charged on acceptance; every other status costs 0, including
+        `running` when a refresh is already under way. Read progress with
+        `get_case_refresh_state`. Not available on the Free tier.
+        """
+        path = "/cases/by-cnr/{}/refresh".format(quote(cnr_for_request(cnr), safe=""))
+        return self._envelope(self._transport.request(
+            "POST", path, json_body={}, timeout=timeout, retry_posts=retry_posts,
+            idempotency_key=self._resolve_idempotency_key(idempotency_key, retry_posts),
+        ))
+
+    def get_case_refresh_state(self, cnr: str, timeout: Optional[float] = None) -> APIResponse[CnrRefreshState]:
+        """Where a CNR's refresh stands.
+
+        Free, and counts against the daily distinct cases allowance, so poll a
+        few at a time. `failed` when the latest attempt gave up. Not available
+        on the Free tier.
+        """
+        path = "/cases/by-cnr/{}/refresh".format(quote(cnr_for_request(cnr), safe=""))
+        return self._envelope(self._transport.request("GET", path, timeout=timeout))
+
+    def refresh_cases_batch(
+        self,
+        cnrs: Sequence[str],
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[CnrRefreshBatch]:
+        """Refresh up to 50 CNRs in one call and answer at once, with a `status` for each.
+
+        1 credit per CNR that reaches `queued`; every other status costs 0.
+        When the daily live fetch allowance runs out the rest answer
+        `not_accepted` and `meta["truncated"]` is True.
+        """
+        return self._envelope(self._transport.request(
+            "POST", "/cases/refresh/batch", json_body={"cnrs": [cnr_for_request(c) for c in cnrs]},
+            timeout=timeout, retry_posts=retry_posts,
+            idempotency_key=self._resolve_idempotency_key(idempotency_key, retry_posts),
+        ))
 
     # Watchlists
 

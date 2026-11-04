@@ -324,6 +324,70 @@ class CaseDetails(TypedDict, total=False):
     hasAnalysis: bool
 
 
+class CaseAdvocates(TypedDict):
+    petitioner: List[str]
+    respondent: List[str]
+
+
+class CaseHearing(TypedDict):
+    businessDate: Optional[str]
+    hearingDate: Optional[str]
+    purpose: Optional[str]
+    judge: Optional[str]
+    causeListType: Optional[str]
+
+
+class CaseDocumentRow(TypedDict):
+    id: str
+    kind: str
+    date: Optional[str]
+    orderNumber: Optional[str]
+    textAvailable: bool
+    pdfAvailable: bool
+
+
+class CaseDocuments(TypedDict):
+    caseId: str
+    documents: List[CaseDocumentRow]
+
+
+class CaseDocumentText(TypedDict):
+    caseId: str
+    documentId: str
+    kind: str
+    date: Optional[str]
+    orderNumber: Optional[str]
+    textAvailable: bool
+    text: Optional[str]
+    textLength: int
+    textTruncated: bool
+    pdfAvailable: bool
+
+
+class CnrRefreshResult(TypedDict):
+    input: str
+    cnr: Optional[str]
+    status: str
+    caseId: Optional[str]
+    lastRefreshedAt: Optional[str]
+
+
+class CnrRefreshBatchSummary(TypedDict):
+    requested: int
+    started: int
+
+
+class CnrRefreshBatch(TypedDict):
+    results: List[CnrRefreshResult]
+    summary: CnrRefreshBatchSummary
+
+
+class CnrRefreshState(TypedDict):
+    cnr: str
+    state: str
+    lastRefreshedAt: Optional[str]
+
+
 class CaseDetailsMeta(TypedDict, total=False):
     responseTime: str
     note: str

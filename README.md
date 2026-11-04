@@ -327,6 +327,29 @@ print(result.data["districtCourts"].get("records"))
 
 Most fields are optional (use `.get(...)` rather than `[...]`), since a court or year row may not report every stat.
 
+## Case depth and refresh by CNR
+
+```python
+# Hearing history and advocates, at no extra charge. Either can be None when we hold no such record.
+record = cm.get_case(case_id, include=["hearings", "advocates"])
+
+# The documents of a case, then the stored text of one. 2 credits when text comes back, free when it does not.
+rows = cm.list_case_orders(case_id).data["documents"]
+for row in rows:
+    if row["textAvailable"]:
+        print(cm.get_case_document_text(case_id, row["id"]).data["text"])
+        break
+
+# Refresh by CNR: answers at once. 1 credit when queued, 0 for every other status.
+cm.refresh_case_by_cnr("DLHC010084212021")
+state = cm.get_case_refresh_state("DLHC010084212021")  # free
+
+# Up to 50 CNRs in one call, a status for each.
+batch = cm.refresh_cases_batch(["DLHC010084212021", "DLHC010084222021"])
+```
+
+Not every order has readable text, and how many do varies by court and by age, so read `textAvailable` rather than assuming. Calls that return text count against a monthly allowance (`ORDER_TEXT_LIMIT_REACHED`). A refresh charged on acceptance is not refunded if the court fetch later fails.
+
 ## CNR lookup and case monitoring
 
 Look a case up by CNR (any common spelling works), or watch a list of CNRs

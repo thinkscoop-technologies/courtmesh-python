@@ -61,6 +61,47 @@ def test_normalize_cnr_rejects_garbage():
     assert assert_cnr("cnr: dlhc010084212021") == CNR
 
 
+# -- case depth and refresh ------------------------------------------------
+
+
+def test_include_is_sent_on_get_case_and_by_cnr(make_client):
+    client, mock = make_client()
+    mock.return_value = ok({"id": "c1"})
+    client.get_case("c1")
+    assert call(mock)[2]["params"] is None
+    client.get_case("c1", include=["hearings", "advocates"])
+    assert call(mock, 1)[2]["params"] == {"include": "hearings,advocates"}
+    client.get_case_by_cnr(CNR, fetch=True, include=["advocates"])
+    assert call(mock, 2)[2]["params"] == {"fetch": "true", "include": "advocates"}
+
+
+def test_orders_and_text_paths(make_client):
+    client, mock = make_client()
+    mock.return_value = ok({"caseId": "c1", "documents": []})
+    client.list_case_orders("c1")
+    assert call(mock)[1] == BASE + "/cases/c1/orders"
+    mock.return_value = ok({"textAvailable": False, "text": None})
+    res = client.get_case_document_text("c1", "d1")
+    assert call(mock, 1)[1] == BASE + "/cases/c1/orders/d1/text"
+    assert res.data["text"] is None
+
+
+def test_refresh_state_and_batch(make_client):
+    client, mock = make_client()
+    mock.return_value = FakeResponse(202, {"success": True, "data": {"input": CNR, "cnr": CNR, "status": "queued"}})
+    res = client.refresh_case_by_cnr("cnr: dlhc-01-008421-2021")
+    method, url, _ = call(mock)
+    assert (method, url) == ("POST", BASE + "/cases/by-cnr/" + CNR + "/refresh")
+    assert res.data["status"] == "queued"
+    mock.return_value = ok({"cnr": CNR, "state": "running", "lastRefreshedAt": None})
+    client.get_case_refresh_state(CNR)
+    assert call(mock, 1)[:2] == ("GET", BASE + "/cases/by-cnr/" + CNR + "/refresh")
+    mock.return_value = ok({"results": [], "summary": {"requested": 1, "started": 0}})
+    client.refresh_cases_batch(["dlhc-01-008421-2021", "junk"])
+    assert call(mock, 2)[1] == BASE + "/cases/refresh/batch"
+    assert call(mock, 2)[2]["json"] == {"cnrs": [CNR, "junk"]}
+
+
 # -- get_case_by_cnr -------------------------------------------------------
 
 
@@ -319,11 +360,11 @@ def test_delete_retried_by_default_but_patch_is_not(make_client, sleep_calls):
     assert mock2.call_count == 1
 
 
-def test_user_agent_is_0_5_0(make_client):
+def test_user_agent_is_0_6_0(make_client):
     client, mock = make_client()
     mock.return_value = ok({"id": "wh_1"})
     client.get_webhook("wh_1")
-    assert call(mock)[2]["headers"]["User-Agent"] == "courtmesh-python/0.5.0"
+    assert call(mock)[2]["headers"]["User-Agent"] == "courtmesh-python/0.6.0"
 
 
 # -- verify_webhook_signature --------------------------------------------------
