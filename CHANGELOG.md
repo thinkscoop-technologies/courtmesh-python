@@ -20,7 +20,7 @@ Adds the Acts and sections API. These calls need the `legislation` scope and cos
 
 ### Notes
 
-- Some matters are never listed on the citing list, and a page can hold fewer rows than `limit`, or none, while `hasMore` is true. Keep following `nextCursor`. Search, resolve and lookup calls have a lower per minute limit and return 429 above it.
+- Some matters are never listed on the citing list, and a page can hold fewer rows than `limit`, or none, while `hasMore` is true. Keep following `nextCursor`. Search, resolve, lookup and citing list calls have a lower per minute limit and return 429 above it.
 - The citing list is not exhaustive, and an empty list does not mean no judgment applied the provision. Check repeal status before relying on an act or provision.
 - `get_act_history` is act level and does not map old sections to new ones.
 
