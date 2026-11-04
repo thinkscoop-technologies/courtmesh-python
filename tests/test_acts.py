@@ -133,7 +133,7 @@ def test_get_act_section_404_is_section_not_found(make_client):
 def _citing(ids):
     return {
         "section": {"actSlug": SLUG, "slug": "section-302", "number": "302"},
-        "listAvailable": True, "note": "Not an exhaustive list.", "total": 3, "totalIsLowerBound": False,
+        "listAvailable": True, "note": "Not an exhaustive list.",
         "cases": [{"id": i, "title": "State v. Example"} for i in ids],
     }
 
@@ -142,7 +142,6 @@ def test_list_section_citing_cases(make_client):
     client, mock = make_client()
     mock.return_value = ok(
         _citing(["a"]),
-        meta={"someRecordsWithheld": True},
         pagination={"limit": 1, "hasMore": True, "nextCursor": "c2"},
     )
     result = client.list_section_citing_cases(SLUG, "section-302", cursor="c1", limit=1)
@@ -150,7 +149,6 @@ def test_list_section_citing_cases(make_client):
     assert call(mock)[2]["params"] == {"cursor": "c1", "limit": 1}
     assert result.data["cases"][0]["id"] == "a"
     assert result.data["listAvailable"] is True
-    assert result.meta["someRecordsWithheld"] is True
     assert result.next_cursor == "c2"
 
 
@@ -164,6 +162,19 @@ def test_iter_section_citing_cases_walks_cursors(make_client):
     assert ids == ["a", "b", "c"]
     assert mock.call_count == 2
     assert call(mock, 1)[2]["params"] == {"cursor": "c2", "limit": 2}
+
+
+def test_iter_section_citing_cases_follows_cursor_through_empty_page(make_client):
+    client, mock = make_client()
+    mock.side_effect = [
+        ok(_citing(["a"]), pagination={"limit": 2, "hasMore": True, "nextCursor": "c2"}),
+        ok(_citing([]), pagination={"limit": 2, "hasMore": True, "nextCursor": "c3"}),
+        ok(_citing(["b"]), pagination={"limit": 2, "hasMore": False, "nextCursor": None}),
+    ]
+    ids = [c["id"] for c in client.iter_section_citing_cases(SLUG, "section-302", limit=2)]
+    assert ids == ["a", "b"]
+    assert mock.call_count == 3
+    assert call(mock, 2)[2]["params"] == {"cursor": "c3", "limit": 2}
 
 
 def test_citing_cases_bad_cursor_and_unknown_section(make_client):

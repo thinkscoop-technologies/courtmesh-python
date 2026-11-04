@@ -1536,17 +1536,16 @@ class CitingCase(TypedDict, total=False):
 class CitingCases(TypedDict, total=False):
     """`data` of `list_section_citing_cases`: judgments citing exactly one
     provision, newest first. Not an exhaustive list of every judgment applying
-    the provision, and an empty list does not mean no judgment applied it."""
+    the provision, and an empty list does not mean no judgment applied it.
+    Some matters are never listed."""
 
     section: Dict[str, Any]
-    #: False when judgments cannot be listed for this provision. That says
-    #: nothing about whether any exist.
+    #: False for a provision we do not list judgments for, including sexual
+    #: offences and cruelty provisions. That says nothing about whether any exist.
     listAvailable: bool
     note: str
-    #: Citing judgments found, before any are withheld.
-    total: int
-    #: True when there are at least `total`.
-    totalIsLowerBound: bool
+    #: A page can hold fewer rows than `limit`, or none, while
+    #: `pagination["hasMore"]` is true. Keep following `nextCursor`.
     cases: List[CitingCase]
 
 
@@ -1564,10 +1563,9 @@ class ActsPageResult(Generic[T]):
 
 @dataclass
 class CitingCasesResult:
-    """Result of `list_section_citing_cases`. `meta` may carry
-    `someRecordsWithheld` (matters left out because they are withheld) and
-    `restrictedCheckDegraded` (that check could not run, so titles are
-    masked). `pagination` holds `limit`, `hasMore` and `nextCursor`."""
+    """Result of `list_section_citing_cases`. `pagination` holds
+    `limit`, `hasMore` and `nextCursor`. A page can be empty while `hasMore`
+    is true."""
 
     data: CitingCases
     meta: Dict[str, Any]

@@ -1593,13 +1593,14 @@ class CourtMesh:
         that cite only its successor. This is not an exhaustive list of every
         judgment applying the provision, and an empty list does not mean no
         judgment applied it. ``data["listAvailable"]`` is false for a
-        provision judgments cannot be listed for. Withheld matters are left
-        out (``meta["someRecordsWithheld"]``); if that check could not run,
-        titles are masked (``meta["restrictedCheckDegraded"]``). Read a
-        judgment with ``get_case(id)``. A temporary failure raises
+        provision we do not list judgments for, including sexual offences and
+        cruelty provisions. Some matters are never listed. A page can hold
+        fewer rows than ``limit``, or none, while ``pagination["hasMore"]`` is
+        true, so keep following ``pagination["nextCursor"]``. The cursor is
+        opaque and valid only for the provision it was issued for. Read a
+        judgment with ``get_case(id)``. A failed check raises
         ``BadGatewayError`` (``UPSTREAM_UNAVAILABLE``); it is free and safe to
-        retry. 1 credit when cases come back. A ``cursor`` is valid only for the
-        provision it was issued for.
+        retry. 1 credit when cases come back.
         """
         params = _compact(cursor=cursor, limit=limit)
         path = "/acts/{}/sections/{}/citing-cases".format(_seg(slug), _seg(section_slug))
@@ -1618,8 +1619,10 @@ class CourtMesh:
         limit: Optional[int] = None,
         max_pages: Optional[int] = None,
     ) -> Iterator[CitingCase]:
-        """Yield every citing judgment for a provision, following cursors. The
-        same caveats apply: the list is not exhaustive."""
+        """Yield every citing judgment for a provision, following cursors
+        until ``nextCursor`` is null. An empty page in the middle is skipped
+        over, not treated as the end. The same caveats apply: the list is not
+        exhaustive."""
 
         def fetch(c: Optional[str]) -> CursorListResult[CitingCase]:
             result = self.list_section_citing_cases(slug, section_slug, cursor=c, limit=limit)
