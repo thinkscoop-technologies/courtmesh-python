@@ -68,6 +68,9 @@ if Literal is not None:
         "IDEMPOTENCY_KEY_REUSED",
         "IDEMPOTENCY_IN_PROGRESS",
         "IDEMPOTENCY_KEY_INVALID",
+        "ACT_NOT_FOUND",
+        "SECTION_NOT_FOUND",
+        "UPSTREAM_UNAVAILABLE",
     ]
 else:  # pragma: no cover
     ApiRefusalCode = str  # type: ignore[assignment,misc]
@@ -118,6 +121,9 @@ API_REFUSAL_CODES: Tuple[str, ...] = (
     "IDEMPOTENCY_KEY_REUSED",
     "IDEMPOTENCY_IN_PROGRESS",
     "IDEMPOTENCY_KEY_INVALID",
+    "ACT_NOT_FOUND",
+    "SECTION_NOT_FOUND",
+    "UPSTREAM_UNAVAILABLE",
 )
 
 #: 429 codes safe to retry automatically. Never a daily/monthly cap code.

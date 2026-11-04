@@ -489,6 +489,34 @@ CNR that is not in the list). API keys need the
 `monitoring:read` and `monitoring:write` scopes (keys without explicit
 scopes have full access).
 
+## Acts and sections
+
+Read Indian statutes: find an act, read a provision with its amendment notes, follow what replaced a repealed law, and list judgments that cite a provision. These calls need the `legislation` scope. Each costs 1 credit when it returns something and nothing when it returns nothing. Text is the statute as published. Repeal status is on every act and provision, so check `repealed` (acts) and `actRepealed` or `repealedProvision` (provisions) before relying on one.
+
+```python
+from courtmesh import CourtMesh
+
+with CourtMesh(api_key="cm-...") as cm:
+    # "section 302 IPC" to the provision it names. A lettered section keeps its letter.
+    found = cm.lookup_section("section 302 IPC")
+    match = found.data["matches"][0]  # match["ambiguous"] is True when no act was named
+    section = match["section"]
+    print(section["actRepealed"], section.get("actRepealNote"))
+
+    # The full text, then judgments citing exactly this provision.
+    text = cm.get_act_section(section["actSlug"], section["slug"])
+    print(text.data["text"])
+
+    for case in cm.iter_section_citing_cases(section["actSlug"], section["slug"]):
+        print(case["id"], case.get("title"), case.get("decisionDate"))
+```
+
+Methods: `search_acts`, `resolve_act`, `get_act`, `get_act_history`, `list_act_sections`, `get_act_section`, `list_section_citing_cases` (with the `iter_section_citing_cases` generator), `search_sections`, `lookup_section`.
+
+The citing list is not exhaustive: an empty list does not mean no judgment applied the provision, and `listAvailable: false` means judgments cannot be listed for that provision. It matches the exact provision only, so a search for section 302 of the Penal Code does not return judgments that cite only its successor. Withheld matters are left out and `meta["someRecordsWithheld"]` says so. `get_act_history` is at act level: it lists what repealed an act and what amended it, and does not map old sections to new ones. "Order VII Rule 11 CPC" style citations are not resolved by `lookup_section` and return no match.
+
+An unknown act slug raises `NotFoundError` with `code == "ACT_NOT_FOUND"`, and an unknown provision raises it with `SECTION_NOT_FOUND`. Neither is charged. A temporary failure listing citing judgments raises `BadGatewayError` (`UPSTREAM_UNAVAILABLE`); it is free and safe to retry.
+
 ## Pagination
 
 `search_cases` and `semantic_search` both take `page` / `limit` and return a
@@ -577,7 +605,7 @@ Exception classes map to real HTTP status codes:
 | 401 | `AuthenticationError` (`code`: `API_KEY_MISSING`, `API_KEY_INVALID_FORMAT`, `API_KEY_INVALID`, `API_KEY_REVOKED`, `API_KEY_EXPIRED`) |
 | 402 | `InsufficientCreditsError` (every priced endpoint pre-flight reserves the charge before doing any work; `required`, `balance`, `shortfall`, `wallet`, `wallet_owner` (`"user"` or `"org"`), and either `top_up_url` or `contact_admin=True`, never both) |
 | 403 | `PermissionDeniedError` (`code`/`response_body["upgradeUrl"]` for tier/feature restrictions, for example `API_NOT_AVAILABLE_ON_TRIAL`, `API_TIER_NOT_ALLOWED`, `SEMANTIC_NOT_ALLOWED`, `LIVE_FETCH_NOT_ALLOWED`, `REMOTE_FETCH_NOT_ALLOWED`, `PARTY_SCREEN_LIMIT_REACHED`) |
-| 404 | `NotFoundError` (`code`: `CASE_NOT_FOUND` or `PDF_NOT_STORED` on the pdf endpoint) |
+| 404 | `NotFoundError` (`code`: `CASE_NOT_FOUND` or `PDF_NOT_STORED` on the pdf endpoint; `ACT_NOT_FOUND` or `SECTION_NOT_FOUND` on the acts endpoints) |
 | 408 | `RequestTimeoutError` |
 | 429 | `RateLimitError` (has `retry_after`, `reset_time`; `code` is `RATE_LIMITED`, `CONCURRENT_ANALYSIS_LIMIT`, or a daily/monthly cap code like `DISTINCT_NAMES_LIMIT_REACHED`) |
 | 500 | `ServerError` |

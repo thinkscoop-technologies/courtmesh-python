@@ -319,11 +319,11 @@ def test_delete_retried_by_default_but_patch_is_not(make_client, sleep_calls):
     assert mock2.call_count == 1
 
 
-def test_user_agent_is_0_5_0(make_client):
+def test_user_agent_is_0_6_0(make_client):
     client, mock = make_client()
     mock.return_value = ok({"id": "wh_1"})
     client.get_webhook("wh_1")
-    assert call(mock)[2]["headers"]["User-Agent"] == "courtmesh-python/0.5.0"
+    assert call(mock)[2]["headers"]["User-Agent"] == "courtmesh-python/0.6.0"
 
 
 # -- verify_webhook_signature --------------------------------------------------

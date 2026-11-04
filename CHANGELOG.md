@@ -7,6 +7,22 @@ Each entry also states which server flags/behaviour the version targets on
 the CourtMesh research server, since some of this SDK's contract only takes
 effect once a given server flag is on for your account.
 
+## [0.6.0]
+
+Adds the Acts and sections API. These calls need the `legislation` scope and cost 1 credit when something is returned, nothing when nothing is.
+
+### Added
+
+- `search_acts`, `resolve_act`, `get_act`, `get_act_history`, `list_act_sections`, `get_act_section`, `list_section_citing_cases`, `search_sections` and `lookup_section`.
+- `iter_section_citing_cases`, a generator that walks the citing judgments cursor by cursor.
+- Typed models for all of the above, exported from the package root (`Act`, `ActSection`, `ActHistory`, `SectionRow`, `CitingCases` and others), plus `ActsPageResult` and `CitingCasesResult`.
+- Error codes `ACT_NOT_FOUND` and `SECTION_NOT_FOUND` (both `NotFoundError`, not charged) and `UPSTREAM_UNAVAILABLE` (`BadGatewayError`, not charged, safe to retry), in `API_REFUSAL_CODES`.
+
+### Notes
+
+- The citing list is not exhaustive, and an empty list does not mean no judgment applied the provision. Check repeal status before relying on an act or provision.
+- `get_act_history` is act level and does not map old sections to new ones.
+
 ## [0.5.0]
 
 Adds CNR lookup and case monitoring (API docs 1.3.0).

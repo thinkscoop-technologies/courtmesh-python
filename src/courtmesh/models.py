@@ -1359,3 +1359,222 @@ class WebhookDelivery(TypedDict, total=False):
     lastResponseStatus: Optional[int]
     lastError: Optional[str]
     createdAt: str
+
+
+# ---------------------------------------------------------------------------
+# Acts and sections (0.6.0). These endpoints need the `legislation` scope.
+# Each call costs 1 credit when it returns something and nothing when it
+# returns nothing. Repeal status is on every act and provision: check it
+# before relying on one.
+# ---------------------------------------------------------------------------
+
+
+class ActsPagePagination(TypedDict, total=False):
+    """Pagination of the page numbered acts endpoints. `total` counts matches
+    before unpublished records are removed, so a page can hold fewer rows
+    than `limit`."""
+
+    page: int
+    limit: int
+    total: int
+    totalPages: int
+    hasMore: bool
+
+
+class ActSummary(TypedDict, total=False):
+    slug: str
+    title: str
+    docClass: str
+    year: Optional[int]
+    number: Optional[str]
+    citation: Optional[str]
+    jurisdiction: str
+    stateName: Optional[str]
+    #: Short forms this act is known by.
+    aliases: List[str]
+    #: Whether the act has been repealed. Check this before relying on it.
+    repealed: bool
+    #: What repealed it, and from when.
+    repealNote: Optional[str]
+
+
+class Act(ActSummary, total=False):
+    shortTitle: Optional[str]
+    longTitle: Optional[str]
+    ministryName: Optional[str]
+    subjects: List[str]
+    #: ``sections`` has a table of contents. ``full-text`` was published only as
+    #: one document, so it has no provisions to list.
+    textSource: str
+    sectionCount: int
+    #: A caveat about how the text was extracted, when there is one.
+    textNote: Optional[str]
+
+
+class ActMatch(TypedDict, total=False):
+    act: ActSummary
+    #: ``short_form`` is an exact match on a known short form, otherwise ``text``.
+    matchedBy: str
+
+
+class ActResolution(TypedDict, total=False):
+    """`data` of `resolve_act`: up to five candidates, best first."""
+
+    query: str
+    matches: List[ActMatch]
+
+
+class ActAmendment(TypedDict, total=False):
+    slug: Optional[str]
+    title: str
+    year: Optional[int]
+    number: Optional[str]
+    citation: Optional[str]
+    sourceUrl: Optional[str]
+
+
+class ActHistory(TypedDict, total=False):
+    """`data` of `get_act_history`. Act level only: it does not map old
+    sections to new ones."""
+
+    slug: str
+    #: What repealed this act. Empty when no repeal is recorded.
+    succession: List[Dict[str, Any]]
+    amendments: List[ActAmendment]
+    #: Amendments made by a State, which apply only in that State.
+    stateAmendments: List[Dict[str, Any]]
+    editions: List[Dict[str, Any]]
+    #: Rules, regulations and notifications made under the act, up to 100 of each kind.
+    instruments: List[Dict[str, Any]]
+    #: How many instruments of each kind exist, which can exceed what is listed.
+    instrumentCounts: Dict[str, int]
+
+
+class ActSectionEntry(TypedDict, total=False):
+    """One provision in an act's table of contents."""
+
+    actSlug: str
+    slug: str
+    partType: str
+    number: Optional[str]
+    heading: Optional[str]
+    #: Judgments recorded as citing this provision. Not an exhaustive count.
+    citationCount: int
+    #: Whether this provision on its own was repealed. See `actRepealed` for the act.
+    repealedProvision: bool
+
+
+class SectionRow(ActSectionEntry, total=False):
+    """A provision with its act, as returned by `search_sections` and `lookup_section`."""
+
+    actTitle: Optional[str]
+    actYear: Optional[int]
+    jurisdiction: Optional[str]
+    stateName: Optional[str]
+    #: Whether the act this provision belongs to was repealed.
+    actRepealed: bool
+    actRepealNote: Optional[str]
+    #: Present on search results.
+    snippet: str
+
+
+class ActSectionBlock(TypedDict, total=False):
+    depth: int
+    kind: str
+    marker: Optional[str]
+    text: str
+
+
+class ActSectionAmendment(TypedDict, total=False):
+    action: str
+    note: str
+    byInstrument: Optional[str]
+    byYear: Optional[int]
+
+
+class ActSection(SectionRow, total=False):
+    """`data` of `get_act_section`."""
+
+    textNote: Optional[str]
+    #: The whole provision as plain text.
+    text: str
+    #: The same text with its structure: subsections, clauses, provisos, explanations.
+    blocks: List[ActSectionBlock]
+    amendments: List[ActSectionAmendment]
+    previous: Optional[Dict[str, Any]]
+    next: Optional[Dict[str, Any]]
+
+
+class SectionMatch(TypedDict, total=False):
+    section: SectionRow
+    #: ``alias``, ``title`` or ``number_only``.
+    matchedBy: str
+    #: True when no act was named, so this is one of many provisions with that
+    #: number. Choose or name the act.
+    ambiguous: bool
+
+
+class SectionLookup(TypedDict, total=False):
+    """`data` of `lookup_section`: provisions the citation could name, best first."""
+
+    query: str
+    matches: List[SectionMatch]
+
+
+class CitingCase(TypedDict, total=False):
+    #: Read the judgment with `get_case(id)`.
+    id: str
+    title: Optional[str]
+    court: Optional[str]
+    courtType: Optional[str]
+    cnr: Optional[str]
+    caseNumber: Optional[str]
+    #: ISO date.
+    decisionDate: Optional[str]
+
+
+class CitingCases(TypedDict, total=False):
+    """`data` of `list_section_citing_cases`: judgments citing exactly one
+    provision, newest first. Not an exhaustive list of every judgment applying
+    the provision, and an empty list does not mean no judgment applied it."""
+
+    section: Dict[str, Any]
+    #: False when judgments cannot be listed for this provision. That says
+    #: nothing about whether any exist.
+    listAvailable: bool
+    note: str
+    #: Citing judgments found, before any are withheld.
+    total: int
+    #: True when there are at least `total`.
+    totalIsLowerBound: bool
+    cases: List[CitingCase]
+
+
+@dataclass
+class ActsPageResult(Generic[T]):
+    """One page of a page numbered acts endpoint (`search_acts`,
+    `list_act_sections`, `search_sections`)."""
+
+    data: List[T]
+    meta: Dict[str, Any]
+    pagination: ActsPagePagination
+    #: See `APIResponse.request_id`.
+    request_id: Optional[str] = None
+
+
+@dataclass
+class CitingCasesResult:
+    """Result of `list_section_citing_cases`. `meta` may carry
+    `someRecordsWithheld` (matters left out because they are withheld) and
+    `restrictedCheckDegraded` (that check could not run, so titles are
+    masked). `pagination` holds `limit`, `hasMore` and `nextCursor`."""
+
+    data: CitingCases
+    meta: Dict[str, Any]
+    pagination: CursorPagination
+    #: See `APIResponse.request_id`.
+    request_id: Optional[str] = None
+
+    @property
+    def next_cursor(self) -> Optional[str]:
+        return self.pagination.get("nextCursor")

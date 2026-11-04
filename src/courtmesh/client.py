@@ -14,6 +14,13 @@ from .errors import CourtMeshError
 from .monitoring import cnr_for_request
 from .models import (
     APIResponse,
+    Act,
+    ActHistory,
+    ActResolution,
+    ActSection,
+    ActSectionEntry,
+    ActSummary,
+    ActsPageResult,
     AnalyzeResponse,
     AuditData,
     AuditResult,
@@ -21,6 +28,8 @@ from .models import (
     CaseDetails,
     CaseTypeEntry,
     ChangeEvent,
+    CitingCase,
+    CitingCasesResult,
     CnrLookup,
     ConsolidatedAnalyzeResponse,
     CourtHierarchy,
@@ -34,6 +43,8 @@ from .models import (
     RelatedResponse,
     RequestTimelineResponse,
     SearchCasesResult,
+    SectionLookup,
+    SectionRow,
     SemanticSearchResult,
     TimelineJob,
     UsageData,
@@ -1467,3 +1478,184 @@ class CourtMesh:
         """Re-queue one delivery to be sent now."""
         path = "/webhooks/{}/deliveries/{}/retry".format(_seg(webhook_id), _seg(delivery_id))
         return self._post(path, None, timeout, retry_posts, idempotency_key)
+
+    # -- Acts and sections (needs the `legislation` scope) --------------------
+
+    def _acts_page(self, response: Any) -> ActsPageResult[Any]:
+        body = self._transport.parse_envelope(response)
+        return ActsPageResult(
+            data=body.get("data", []),
+            meta=body.get("meta", {}),
+            pagination=body.get("pagination", {}),
+            request_id=body.get("requestId"),
+        )
+
+    def search_acts(
+        self,
+        query: str,
+        doc_class: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
+        year_from: Optional[int] = None,
+        year_to: Optional[int] = None,
+        page: Optional[int] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> ActsPageResult[ActSummary]:
+        """Find acts by title, short form or subject, ``GET /acts/search``.
+
+        1 credit when something is returned, nothing when nothing is.
+        ``pagination["total"]`` counts matches before unpublished records are
+        removed, so a page can hold fewer rows than ``limit``. ``meta["weakMatch"]``
+        is true when nothing matched closely. ``doc_class`` is one of ``act``,
+        ``ordinance``, ``rule``, ``regulation``, ``amendment_act``,
+        ``constitution``, ``code``; ``jurisdiction`` is ``central``, ``state``
+        or ``union_territory``. Check ``repealed`` on each act before relying
+        on it.
+        """
+        params = _compact(
+            q=query,
+            docClass=doc_class,
+            jurisdiction=jurisdiction,
+            yearFrom=year_from,
+            yearTo=year_to,
+            page=page,
+            limit=limit,
+        )
+        return self._acts_page(self._transport.request("GET", "/acts/search", params=params, timeout=timeout))
+
+    def resolve_act(self, query: str, timeout: Optional[float] = None) -> APIResponse[ActResolution]:
+        """Turn what a lawyer writes ("IPC", "NI Act") into the act, ``GET /acts/resolve``.
+
+        Returns up to five candidates, best first. Same pricing as ``search_acts``.
+        """
+        response = self._transport.request("GET", "/acts/resolve", params={"q": query}, timeout=timeout)
+        return self._envelope(response)
+
+    def get_act(self, slug: str, timeout: Optional[float] = None) -> APIResponse[Act]:
+        """One act's details and repeal status, without its text, ``GET /acts/{slug}``.
+
+        An unknown slug raises ``NotFoundError`` with ``code == "ACT_NOT_FOUND"``
+        and costs nothing. 1 credit otherwise.
+        """
+        response = self._transport.request("GET", "/acts/{}".format(_seg(slug)), timeout=timeout)
+        return self._envelope(response)
+
+    def get_act_history(self, slug: str, timeout: Optional[float] = None) -> APIResponse[ActHistory]:
+        """What repealed an act and what amended it, ``GET /acts/{slug}/history``.
+
+        Act level only: it does not map old sections to new ones. An unknown
+        slug raises ``NotFoundError`` (``ACT_NOT_FOUND``). 1 credit.
+        """
+        response = self._transport.request("GET", "/acts/{}/history".format(_seg(slug)), timeout=timeout)
+        return self._envelope(response)
+
+    def list_act_sections(
+        self,
+        slug: str,
+        page: Optional[int] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> ActsPageResult[ActSectionEntry]:
+        """The provisions of an act in order, without their text, ``GET /acts/{slug}/sections``.
+
+        An act published only as one document has none (see ``textSource`` on
+        ``get_act``). An unknown slug raises ``NotFoundError`` (``ACT_NOT_FOUND``).
+        1 credit when rows come back.
+        """
+        params = _compact(page=page, limit=limit)
+        path = "/acts/{}/sections".format(_seg(slug))
+        return self._acts_page(self._transport.request("GET", path, params=params, timeout=timeout))
+
+    def get_act_section(
+        self, slug: str, section_slug: str, timeout: Optional[float] = None
+    ) -> APIResponse[ActSection]:
+        """One provision's full text, structured into blocks, with its amendment
+        notes and repeal status, ``GET /acts/{slug}/sections/{sectionSlug}``.
+
+        An unknown act or provision raises ``NotFoundError`` with
+        ``code == "SECTION_NOT_FOUND"``, at no charge. 1 credit otherwise.
+        """
+        path = "/acts/{}/sections/{}".format(_seg(slug), _seg(section_slug))
+        return self._envelope(self._transport.request("GET", path, timeout=timeout))
+
+    def list_section_citing_cases(
+        self,
+        slug: str,
+        section_slug: str,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> CitingCasesResult:
+        """Judgments citing exactly this provision, newest first,
+        ``GET /acts/{slug}/sections/{sectionSlug}/citing-cases``.
+
+        A search for section 302 of the Penal Code does not return judgments
+        that cite only its successor. This is not an exhaustive list of every
+        judgment applying the provision, and an empty list does not mean no
+        judgment applied it. ``data["listAvailable"]`` is false for a
+        provision judgments cannot be listed for. Withheld matters are left
+        out (``meta["someRecordsWithheld"]``); if that check could not run,
+        titles are masked (``meta["restrictedCheckDegraded"]``). Read a
+        judgment with ``get_case(id)``. A temporary failure raises
+        ``BadGatewayError`` (``UPSTREAM_UNAVAILABLE``); it is free and safe to
+        retry. 1 credit when cases come back. A ``cursor`` is valid only for the
+        provision it was issued for.
+        """
+        params = _compact(cursor=cursor, limit=limit)
+        path = "/acts/{}/sections/{}/citing-cases".format(_seg(slug), _seg(section_slug))
+        body = self._transport.parse_envelope(self._transport.request("GET", path, params=params, timeout=timeout))
+        return CitingCasesResult(
+            data=body.get("data", {}),
+            meta=body.get("meta", {}),
+            pagination=body.get("pagination", {}),
+            request_id=body.get("requestId"),
+        )
+
+    def iter_section_citing_cases(
+        self,
+        slug: str,
+        section_slug: str,
+        limit: Optional[int] = None,
+        max_pages: Optional[int] = None,
+    ) -> Iterator[CitingCase]:
+        """Yield every citing judgment for a provision, following cursors. The
+        same caveats apply: the list is not exhaustive."""
+
+        def fetch(c: Optional[str]) -> CursorListResult[CitingCase]:
+            result = self.list_section_citing_cases(slug, section_slug, cursor=c, limit=limit)
+            return CursorListResult(
+                data=result.data.get("cases", []), pagination=result.pagination, meta=result.meta
+            )
+
+        return self._iter_cursor(fetch, False, max_pages)
+
+    def search_sections(
+        self,
+        query: str,
+        act: Optional[str] = None,
+        number: Optional[str] = None,
+        page: Optional[int] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> ActsPageResult[SectionRow]:
+        """Full text search across provisions, with a short snippet per row,
+        ``GET /sections/search``.
+
+        Narrow it with ``act`` (an act slug) or ``number`` (an exact provision
+        number such as ``"498A"``). Same pricing and ``pagination["total"]``
+        caveat as ``search_acts``.
+        """
+        params = _compact(q=query, act=act, number=number, page=page, limit=limit)
+        return self._acts_page(self._transport.request("GET", "/sections/search", params=params, timeout=timeout))
+
+    def lookup_section(self, citation: str, timeout: Optional[float] = None) -> APIResponse[SectionLookup]:
+        """Turn shorthand such as "section 302 IPC", "s.138 NI Act" or "Article 21"
+        into the provision it names, ``GET /sections/lookup``.
+
+        A lettered section keeps its letter. "Order VII Rule 11 CPC" is not
+        resolved and returns no match. ``ambiguous`` is true on a match when
+        no act was named: choose or name the act. 1 credit when something is
+        returned.
+        """
+        response = self._transport.request("GET", "/sections/lookup", params={"q": citation}, timeout=timeout)
+        return self._envelope(response)
