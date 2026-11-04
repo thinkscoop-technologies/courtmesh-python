@@ -11,6 +11,19 @@ import requests
 
 from ._http import DEFAULT_MAX_RETRIES, DEFAULT_MAX_RETRY_AFTER_SECONDS, DEFAULT_TIMEOUT, HTTPTransport
 from .errors import CourtMeshError
+from .cause_lists import (
+    CHECK_MAX_DAYS,
+    LISTINGS_MAX_DAYS,
+    CauseListCheckData,
+    CauseListCourtList,
+    CauseListing,
+    CauseListPage,
+    MatterCauseListings,
+    assert_check_body,
+    assert_court_list_query,
+    assert_date_range,
+    assert_matter_id,
+)
 from .monitoring import cnr_for_request
 from .models import (
     APIResponse,
@@ -1467,3 +1480,146 @@ class CourtMesh:
         """Re-queue one delivery to be sent now."""
         path = "/webhooks/{}/deliveries/{}/retry".format(_seg(webhook_id), _seg(delivery_id))
         return self._post(path, None, timeout, retry_posts, idempotency_key)
+
+    # -- Cause lists -------------------------------------------------------------
+
+    def list_cause_listings(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        page: Optional[int] = None,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ) -> CauseListPage:
+        """One page of the listings found for the matters in your account.
+
+        Date range of at most 31 days, sent as `from` and `to` (`YYYY-MM-DD`,
+        both or neither; default is today and the next 7 days). Pages start at
+        1; `limit` is 1 to 100 and no more than your tier's maximum page size
+        (default: the lower of 50 and your tier's maximum). Needs the `causelist` scope. 1 credit per successful
+        call; a failed call is not charged. Only listings that were found are
+        returned: an empty page does not mean a matter is not listed.
+
+        Raises `ValidationError` for a bad date before any request is sent. A
+        temporary outage is `BadGatewayError` (`code == "UPSTREAM_UNAVAILABLE"`,
+        not charged, GET calls are retried); an account without cause list
+        access is `PermissionDeniedError` (`CAUSE_LISTS_NOT_ENABLED`).
+        """
+        assert_date_range(from_date, to_date, LISTINGS_MAX_DAYS)
+        params = _compact(**{"from": from_date, "to": to_date, "page": page, "limit": limit})
+        response = self._transport.request("GET", "/cause-lists/listings", params=params or None, timeout=timeout)
+        body = self._transport.parse_envelope(response)
+        return CauseListPage(
+            data=body.get("data", []),
+            pagination=body.get("pagination", {}),
+            meta=body.get("meta", {}),
+            request_id=body.get("requestId"),
+        )
+
+    def iter_cause_listings(
+        self,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        limit: Optional[int] = None,
+        max_pages: Optional[int] = None,
+    ) -> Iterator[CauseListing]:
+        """Yield every listing, walking pages from 1 until `hasMore` is false.
+        Each page is one call and one credit."""
+        hard_cap = _MAX_SAFETY_PAGES if max_pages is None else min(max_pages, _MAX_SAFETY_PAGES)
+        page = 1
+        for _ in range(hard_cap):
+            result = self.list_cause_listings(from_date, to_date, page=page, limit=limit)
+            items = result.data or []
+            for item in items:
+                yield item
+            if not items or not result.has_more:
+                return
+            page += 1
+
+    def list_matter_cause_listings(
+        self,
+        matter_id: str,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> APIResponse[MatterCauseListings]:
+        """The listings found for one matter in your account (`matter_id` is
+        its 24 character id), within a date range of at most 31 days. 1 credit
+        per successful call. An unknown matter raises `NotFoundError`
+        (`MATTER_NOT_FOUND`), not charged."""
+        assert_matter_id(matter_id)
+        assert_date_range(from_date, to_date, LISTINGS_MAX_DAYS)
+        params = _compact(**{"from": from_date, "to": to_date})
+        path = "/matters/{}/cause-listings".format(_seg(matter_id))
+        return self._envelope(self._transport.request("GET", path, params=params or None, timeout=timeout))
+
+    def get_court_cause_list(
+        self, court_key: str, date: str, timeout: Optional[float] = None
+    ) -> APIResponse[CauseListCourtList]:
+        """The published list of one court for one date, for a court you have
+        an open matter in.
+
+        `court_key` is `SC`, `HC:<state>:<bench>` or
+        `DC:<state>:<district>:<complex>:<establishment>:<court number>`,
+        digits only (a listing's `courtKey` works). `result.data["status"]`
+        says what was read: `ok` and `partial` carry rows (1 credit); `none`,
+        `empty`, `not_published`, `invalid_court` and `unavailable` are a 200
+        with no rows and cost 0 (read `result.meta["creditsCharged"]`). The
+        call still needs 1 credit available when it starts. A court with no
+        open matter of yours raises `NotFoundError` (`COURT_LIST_NOT_FOUND`),
+        not charged.
+        """
+        assert_court_list_query(court_key, date)
+        params = {"courtKey": court_key, "date": date}
+        return self._envelope(self._transport.request("GET", "/cause-lists/court", params=params, timeout=timeout))
+
+    def check_cause_lists(
+        self,
+        cnrs: Sequence[str],
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        timeout: Optional[float] = None,
+        retry_posts: Optional[bool] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> APIResponse[CauseListCheckData]:
+        """Check whether 1 to 100 CNRs that your account watches appear on a
+        stored cause list, for a range of at most 7 days (default: today and
+        tomorrow, Indian calendar). Needs the `causelist` scope. The call never
+        contacts a court: it reads lists already held.
+
+        Each entry of `result.data["results"]` has a `status`:
+
+        - `listed`: a row of the case was found (1 credit).
+        - `no_entry_found`: a list was read and no row was recognised (1
+          credit). This is not proof that the case is not listed;
+          `dates[].complete` says how much was read.
+        - `list_not_read`, `cannot_check`, `not_watched`: free.
+
+        At most 100 CNRs, and the number of distinct CNRs times the number of
+        dates in the range (inclusive, 2 by default) at most 300; both are
+        checked before a request is sent. Repeats of a CNR are ignored.
+
+        Price: 1 credit per CNR with status `listed` or `no_entry_found`,
+        settled once for the whole call (`result.meta["creditsCharged"]`). The
+        call also needs at least 1 credit available when it starts: a balance
+        below the number of watched CNRs in it raises `InsufficientCreditsError`.
+        The same error can arrive after the answer is ready, when the credits
+        due cannot be settled; no results are returned then. A
+        `ServiceUnavailableError` with
+        `code == "SETTLEMENT_UNCONFIRMED"` means the charge outcome is unknown:
+        it is never retried automatically, even with `retry_posts`, and you
+        should check your balance (`get_usage()`) first. Repeating the call with
+        the same `idempotency_key` is refused with 409 `IDEMPOTENCY_IN_PROGRESS`
+        for up to 24 hours. A 503 `ENTITLEMENT_UNAVAILABLE` ran nothing and is
+        safe to retry.
+
+        `result.data["from"]` and `result.data["to"]` are the dates that were
+        looked at (the default range is resolved by the server). Only positive
+        listings are reported. A temporary outage is `BadGatewayError`
+        (`UPSTREAM_UNAVAILABLE`) for the whole call, not charged.
+        `idempotency_key`: see `analyze_case`.
+        """
+        assert_check_body(cnrs, from_date, to_date)
+        payload: Dict[str, Any] = {"cnrs": [cnr_for_request(cnr) for cnr in cnrs]}
+        _set_if_present(payload, **{"from": from_date, "to": to_date})
+        return self._post("/cause-lists/check", payload, timeout, retry_posts, idempotency_key)

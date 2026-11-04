@@ -487,7 +487,56 @@ attempt and never retries. New error codes surface as typed exceptions with
 `WEBHOOK_LIMIT_REACHED`, `INVALID_WEBHOOK_URL`, `ITEM_NOT_FOUND` (removing a
 CNR that is not in the list). API keys need the
 `monitoring:read` and `monitoring:write` scopes (keys without explicit
-scopes have full access).
+scopes have full access). Cause list calls need the `causelist` scope.
+
+## Cause lists
+
+Read the hearing listings found for your matters, read the published list of a court you have a matter in, and check whether CNRs you watch appear on a stored list. All calls need an API key with the `causelist` scope and an account with cause lists enabled.
+
+```python
+# Listings found for your matters. Default range: today and the next 7 days. At most 31 days.
+first = cm.list_cause_listings(from_date="2026-11-05", to_date="2026-11-12", limit=50)
+print(first.data, first.pagination, first.has_more)  # pagination: page, limit, total, totalPages, hasMore
+
+# Walk every listing (pages start at 1; each page is one call).
+for listing in cm.iter_cause_listings(from_date="2026-11-05", to_date="2026-11-12"):
+    print(listing["date"], listing["courtKey"], listing["caseText"])
+
+# One matter. matter_id is the 24 character id.
+one = cm.list_matter_cause_listings("66f1a2b3c4d5e6f7a8b9c0d1")
+print(one.data["matter"], one.data["listings"])
+
+# The published list of one court on one date. court_key comes from a listing.
+court = cm.get_court_cause_list("DC:99:1:9900001:1:1", "2026-11-05")
+print(court.data["status"], court.data["complete"], len(court.data["rows"]))
+
+# Check CNRs you watch (1 to 100). Default range: today and tomorrow. At most 7 days.
+check = cm.check_cause_lists(["ZZAB010000012024", "ZZAB010000022024"])
+for r in check.data["results"]:
+    print(r["cnr"], r["status"], r["reason"], r["listings"])
+print(check.data["summary"], check.meta["creditsCharged"])
+```
+
+`from_date` and `to_date` are sent as `from` and `to`, together or not at all. Dates, `matter_id` and `court_key` are checked before a request is sent and a bad value raises `ValidationError`. A court key is `SC`, `HC:<state>:<bench>` or `DC:<state>:<district>:<complex>:<establishment>:<court number>`, digits only.
+
+| Method | Endpoint | Credits |
+|---|---|---|
+| `list_cause_listings` / `iter_cause_listings` | `GET /cause-lists/listings` | 1 per successful call |
+| `list_matter_cause_listings(matter_id)` | `GET /matters/{matterId}/cause-listings` | 1 per successful call |
+| `get_court_cause_list(court_key, date)` | `GET /cause-lists/court` | 1 when `status` is `ok` or `partial`; 0 for `none`, `empty`, `not_published`, `invalid_court` and `unavailable` |
+| `check_cause_lists(cnrs, from_date, to_date)` | `POST /cause-lists/check` | 1 per CNR with status `listed` or `no_entry_found`; 0 for the rest |
+
+`check_cause_lists` never contacts a court: it reads lists already held, and it takes an `Idempotency-Key` like the other POST calls. Each result has one of these statuses:
+
+| Status | Meaning | Credits |
+|---|---|---|
+| `listed` | A row of this case was found. `listings` holds the rows. | 1 |
+| `no_entry_found` | A list was read and no row was recognised. This does not show the case is not listed: `dates[].complete` says how much of each list was read. | 1 |
+| `list_not_read` | No list was held for the dates. For a District Court it can also mean the list of the case's own courtroom could not be confirmed (`dates[].status` is then `none`). | 0 |
+| `cannot_check` | `reason` says why: `pending`, `record_unavailable`, `court_not_supported`, or a court identification reason (`no_case_identity`, `no_court_key`, `no_court_number`, `invalid_court_key`, `unsupported_court`). `courtKey` can be `None`. | 0 |
+| `not_watched` | Your account does not watch this CNR. | 0 |
+
+Only listings that were found are reported. An empty result is not a statement that a case is absent from a list, so confirm against the court's own list when it matters. At most 100 CNRs, and distinct CNRs (repeats are ignored) times dates in the range (inclusive; 2 by default) at most 300, checked before a request is sent (`ValidationError`). The call also needs at least 1 credit available when it starts: a balance below the number of watched CNRs in the call raises `InsufficientCreditsError`. The same error can arrive after the answer is ready, when the credits due cannot be settled; no results are returned then. A `ServiceUnavailableError` with `code` `SETTLEMENT_UNCONFIRMED` means the answer was ready but the charge outcome is unknown and no results were returned: it is never retried automatically, even with `retry_posts`, so check your balance with `get_usage()` first; repeating the call with the same `idempotency_key` is refused with 409 `IDEMPOTENCY_IN_PROGRESS` for up to 24 hours. A 503 `ENTITLEMENT_UNAVAILABLE` ran nothing and is safe to retry. A listing's `matchedBy` is `cnr`, `diary`, `key` or `related_key`; `caseText` and `courtKey` can be `None`. `data["from"]` and `data["to"]` give the dates that were looked at, including when you sent none. A temporary outage raises `BadGatewayError` (`code == "UPSTREAM_UNAVAILABLE"`) and is not charged; GET calls are retried, and the check call is retried only when `retry_posts` is on (it then sends an `Idempotency-Key`). An account without cause list access raises `PermissionDeniedError` (`CAUSE_LISTS_NOT_ENABLED`); an unknown matter or a court without an open matter of yours raises `NotFoundError`.
 
 ## Pagination
 
@@ -582,7 +631,7 @@ Exception classes map to real HTTP status codes:
 | 429 | `RateLimitError` (has `retry_after`, `reset_time`; `code` is `RATE_LIMITED`, `CONCURRENT_ANALYSIS_LIMIT`, or a daily/monthly cap code like `DISTINCT_NAMES_LIMIT_REACHED`) |
 | 500 | `ServerError` |
 | 502 | `BadGatewayError` (also `code == "PARTY_SCREEN_SEARCH_DEGRADED"` - the underlying case search itself errored and returned nothing usable, retry) |
-| 503 | `ServiceUnavailableError` (`code == "ENTITLEMENT_UNAVAILABLE"` when account standing could not be verified) |
+| 503 | `ServiceUnavailableError` (`code == "ENTITLEMENT_UNAVAILABLE"` when account standing could not be verified, safe to retry; `code == "SETTLEMENT_UNCONFIRMED"` on `check_cause_lists`: the charge outcome is unknown, never retried automatically, check your balance first) |
 
 All inherit `CourtMeshError`. Status codes not in this table (practically,
 only a raw 504 that survives retries) fall back to the base

@@ -381,9 +381,17 @@ class BadGatewayError(CourtMeshError):
 
 
 class ServiceUnavailableError(CourtMeshError):
-    """HTTP 503. Account standing could not be verified
-    (`code == "ENTITLEMENT_UNAVAILABLE"`), or the service is otherwise
-    unavailable. Safe to retry.
+    """HTTP 503.
+
+    - `code == "ENTITLEMENT_UNAVAILABLE"`: account standing could not be
+      verified, nothing ran, safe to retry.
+    - `code == "SETTLEMENT_UNCONFIRMED"` (the cause list check): the answer was
+      ready but the charge could not be confirmed and no results were returned.
+      The charge outcome is unknown, so this is never retried automatically:
+      check your balance (`get_usage()`) first. A retry with the same
+      idempotency key is refused with 409 `IDEMPOTENCY_IN_PROGRESS` for up to
+      24 hours.
+    - Any other 503 is the service being unavailable.
     """
 
 

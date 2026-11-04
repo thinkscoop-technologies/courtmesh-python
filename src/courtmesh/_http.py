@@ -199,12 +199,25 @@ class HTTPTransport:
                 response.status_code in _RETRYABLE_5XX_STATUS_CODES
                 and attempt < self.max_retries
                 and can_retry_after_dispatch
+                and not self._is_settlement_unconfirmed(response)
             ):
                 attempt += 1
                 time.sleep(self._backoff_seconds(attempt))
                 continue
 
             return response
+
+    @staticmethod
+    def _is_settlement_unconfirmed(response: requests.Response) -> bool:
+        """A 503 `SETTLEMENT_UNCONFIRMED` means the charge outcome is unknown, so it is
+        never retried, whatever `retry_posts` says: a retry could charge again."""
+        if response.status_code != 503:
+            return False
+        try:
+            body = response.json()
+        except ValueError:
+            return False
+        return isinstance(body, dict) and body.get("code") == "SETTLEMENT_UNCONFIRMED"
 
     def parse_envelope(self, response: requests.Response) -> Any:
         """Parse the JSON body and raise on HTTP error status codes.
