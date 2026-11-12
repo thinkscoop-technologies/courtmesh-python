@@ -1122,31 +1122,42 @@ class CourtMesh:
             cursor = next_cursor
 
     def get_case_by_cnr(
-        self, cnr: str, fetch: bool = False, timeout: Optional[float] = None
+        self, cnr: str, fetch: Optional[bool] = None, timeout: Optional[float] = None
     ) -> APIResponse[CnrLookup]:
         """Look a case up by CNR (any common spelling, normalised for you).
 
         1 credit, charged only when a record is returned. `result.data["status"]`
         is `found` (200, `result.data["case"]` holds the record) or `pending`
-        (202, a live fetch is running: poll this same call with the same CNR;
-        `result.data["requestId"]` is opaque and is not accepted by
-        `get_timeline`). A CNR that is not in the corpus and was not fetched
-        raises `NotFoundError` (`code == "CASE_NOT_FOUND"`). A Supreme Court
-        CNR that is not in the corpus cannot be fetched live and raises it
-        straight away.
+        (202, the court's official source is being checked: poll this same
+        call with the same CNR; `result.data["requestId"]` is opaque and is
+        not accepted by `get_timeline`).
+
+        By default a CNR we do not hold yet is checked at the official
+        source: eCourts for High Court and District Court CNRs, the Supreme
+        Court website for Supreme Court CNRs (which can take several
+        minutes). The first call returns `pending` and is free; the poll that
+        returns the record is the one 1 credit charge. When the court reports
+        no such case, the poll raises `NotFoundError`
+        (`code == "CASE_NOT_FOUND"`) and nothing is charged. On a plan without
+        live fetch the default simply raises `NotFoundError` on a miss.
 
         Args:
-            fetch: start a live court portal fetch for a CNR we do not hold
-                yet. The call that starts the fetch returns `pending` and is
-                free; the poll that returns the record is the one 1 credit
-                charge, and a fetch the court portal cannot satisfy costs
-                nothing. Shares the daily live fetch cap with
-                `request_timeline(refresh=True)`. If the court portal had
-                nothing for this CNR in the last 24 hours, no new fetch is
-                started and the call raises `NotFoundError` immediately.
+            fetch: `None` (the default) lets the server check the official
+                source as described above. `False` looks only at what we
+                already hold: a miss raises `NotFoundError` straight away.
+                `True` requires the check; on a plan without live fetch it
+                raises `PermissionDeniedError`
+                (`code == "LIVE_FETCH_NOT_ALLOWED"`). New CNR checks count
+                against a daily per account cap shared with
+                `request_timeline(refresh=True)`; past it the call raises
+                `RateLimitError` (`code == "LIVE_FETCH_LIMIT_REACHED"`), which
+                is not retried automatically. If the court had nothing for
+                this CNR in the last 24 hours, it is not checked again and the
+                call raises `NotFoundError` immediately.
         """
         path = "/cases/by-cnr/{}".format(quote(cnr_for_request(cnr), safe=""))
-        response = self._transport.request("GET", path, params={"fetch": "true"} if fetch else None, timeout=timeout)
+        params = None if fetch is None else {"fetch": "true" if fetch else "false"}
+        response = self._transport.request("GET", path, params=params, timeout=timeout)
         return self._envelope(response)
 
     # Watchlists

@@ -341,12 +341,15 @@ from courtmesh import CourtMesh, normalize_cnr
 normalize_cnr("CNR: DLHC-01-008421-2021")  # "DLHC010084212021", or None if it cannot be a CNR
 
 with CourtMesh(api_key=os.environ["COURTMESH_API_KEY"]) as cm:
-    # One-off lookup. fetch=True starts a live fetch for a CNR we do not hold yet.
-    # The starting call returns "pending" and is free; poll the same call (same CNR) until "found".
-    # A CNR we do not hold and did not fetch raises NotFoundError (CASE_NOT_FOUND). So does fetch=True
-    # for a CNR the court portal had nothing for in the last 24 hours: it is not asked again until that passes.
-    lookup = cm.get_case_by_cnr("DLHC010084212021", fetch=True)
+    # One-off lookup. A CNR we do not hold yet is checked at the court's official source by default
+    # (eCourts for High Court and District Court, the Supreme Court website for Supreme Court CNRs).
+    # The first call returns "pending" (202) and is free; poll the same call (same CNR) until "found".
+    # When the court says there is no such case, the poll raises NotFoundError (CASE_NOT_FOUND), uncharged.
+    lookup = cm.get_case_by_cnr("DLHC010084212021")
     print(lookup.data["status"])  # "found" | "pending"
+
+    # Only look at what we already hold: a miss raises NotFoundError straight away.
+    cm.get_case_by_cnr("DLHC010084212021", fetch=False)
 
     # 1. Watch a CNR.
     wl = cm.create_watchlist(
@@ -448,7 +451,7 @@ marked `failed` with `lastError: "expired"` instead of being sent. Use `list_web
 
 | Method | Endpoint | Credits |
 |---|---|---|
-| `get_case_by_cnr(cnr, fetch=False)` | `GET /cases/by-cnr/{cnr}` | 1 when a record is returned (`pending` and `not_found` are free; with `fetch`, the starting call is free and the poll that returns the record is the one charge) |
+| `get_case_by_cnr(cnr, fetch=None)` | `GET /cases/by-cnr/{cnr}` | 1 when a record is returned (`pending` and `not_found` are free; when the official source is checked, the starting call is free and the poll that returns the record is the one charge) |
 | `search_cases(cnr=...)` | `POST /search/cases` | as search (returns one ordinary search hit; progress fields and `orderCount` are only on `get_case_by_cnr`) |
 | `create_watchlist`, `get_watchlist`, `update_watchlist`, `delete_watchlist` | `/watchlists` | 0 |
 | `list_watchlists` / `iter_watchlists` | `GET /watchlists` | 0 |
@@ -463,6 +466,22 @@ marked `failed` with `lastError: "expired"` instead of being sent. Use `list_web
 The `iter_*` helpers yield individual items; the `list_*` methods return a
 `CursorListResult` with `.data`, `.pagination` and `.next_cursor`.
 
+How `get_case_by_cnr` treats a CNR we do not hold yet:
+
+- Default (`fetch=None`): the court's official source is checked when your
+  plan includes live fetch. The first call answers `pending` (202) with a
+  `requestId`, uncharged; polling the same call returns the record (1 credit)
+  or raises `NotFoundError` when the court reports no such case. Supreme Court
+  CNRs are checked at the Supreme Court website and can take several minutes.
+  On a plan without live fetch the default simply raises `NotFoundError` on a
+  miss.
+- `fetch=False`: never checks; a miss raises `NotFoundError` straight away.
+- `fetch=True`: requires the check; on a plan without live fetch it raises
+  `PermissionDeniedError` (`LIVE_FETCH_NOT_ALLOWED`).
+- New CNR checks count against a daily per account cap. Past it the call
+  raises `RateLimitError` (`LIVE_FETCH_LIMIT_REACHED`, 429), which is not
+  retried automatically.
+
 Watch caps per account (distinct CNRs across all watchlists, so the same CNR
 on two lists uses one slot): Free 10, Pay As You Go 1,000, Scale 10,000,
 Enterprise by contract. Two daily limits apply to adding, counted per Indian
@@ -471,11 +490,12 @@ message: every add that results in a watched or pending item counts toward a
 daily add allowance (Free 50, Pay As You Go 5,000, Scale 50,000, Enterprise
 500,000), and adding CNRs we do not hold yet starts a live fetch, so those
 also have their own daily limit (Free 20, Pay As You Go 500, Scale 5,000,
-Enterprise unlimited). A Supreme Court CNR we do not hold comes back
-`not_found` at once. If the court portal had nothing for a CNR in the last 24
-hours, adding it again is `not_found` with a message and starts no new fetch
-(the same cooldown makes `get_case_by_cnr(..., fetch=True)` raise
-`NotFoundError`). `not_found`, `error` and `unavailable` items still count
+Enterprise unlimited). A CNR we do not hold, including a Supreme Court CNR,
+comes back `pending` while the court's official source is checked (a Supreme
+Court check can take several minutes); refresh checks the official source the
+same way. If the court had nothing for a CNR in the last 24 hours, adding it
+again is `not_found` with a message and starts no new check (the same
+cooldown makes `get_case_by_cnr` raise `NotFoundError`). `not_found`, `error` and `unavailable` items still count
 toward the cap until removed. At most
 50 watchlists and 10 webhook endpoints per account. `WATCH_CAP_EXCEEDED`
 (403) is raised only when the cap is already full and you sent a new CNR.
