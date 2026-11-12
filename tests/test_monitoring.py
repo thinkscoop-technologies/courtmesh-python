@@ -7,6 +7,8 @@ from helpers import FakeResponse
 
 from courtmesh import (
     NotFoundError,
+    PermissionDeniedError,
+    RateLimitError,
     ValidationError,
     WebhookSignatureError,
     assert_cnr,
@@ -81,6 +83,44 @@ def test_get_case_by_cnr_fetch_and_pending(make_client):
     assert call(mock)[2]["params"] == {"fetch": "true"}
     assert res.data["status"] == "pending"
     assert res.data["requestId"] == "r1"
+
+
+def test_get_case_by_cnr_default_sends_no_fetch_param(make_client):
+    client, mock = make_client()
+    mock.return_value = FakeResponse(202, {"success": True, "data": {"cnr": CNR, "status": "pending", "requestId": "r2"}})
+    res = client.get_case_by_cnr(CNR)
+    assert call(mock)[2]["params"] is None
+    assert res.data["status"] == "pending"
+
+
+def test_get_case_by_cnr_fetch_false_opts_out(make_client):
+    client, mock = make_client()
+    mock.return_value = FakeResponse(404, {"success": False, "error": "No such case", "code": "CASE_NOT_FOUND"})
+    with pytest.raises(NotFoundError):
+        client.get_case_by_cnr(CNR, fetch=False)
+    assert call(mock)[2]["params"] == {"fetch": "false"}
+
+
+def test_get_case_by_cnr_daily_check_cap_raises_rate_limit_without_retry(make_client):
+    client, mock = make_client()
+    mock.return_value = FakeResponse(
+        429, {"success": False, "error": "Daily limit reached", "code": "LIVE_FETCH_LIMIT_REACHED", "retryAfter": 3600}
+    )
+    with pytest.raises(RateLimitError) as info:
+        client.get_case_by_cnr(CNR)
+    assert info.value.code == "LIVE_FETCH_LIMIT_REACHED"
+    assert mock.call_count == 1
+
+
+def test_get_case_by_cnr_fetch_true_on_tier_without_live_fetch_raises(make_client):
+    client, mock = make_client()
+    mock.return_value = FakeResponse(
+        403, {"success": False, "error": "Not available on this plan", "code": "LIVE_FETCH_NOT_ALLOWED"}
+    )
+    with pytest.raises(PermissionDeniedError) as info:
+        client.get_case_by_cnr(CNR, fetch=True)
+    assert info.value.code == "LIVE_FETCH_NOT_ALLOWED"
+    assert call(mock)[2]["params"] == {"fetch": "true"}
 
 
 def test_get_case_by_cnr_not_found_raises(make_client):

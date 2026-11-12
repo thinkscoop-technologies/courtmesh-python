@@ -7,6 +7,17 @@ Each entry also states which server flags/behaviour the version targets on
 the CourtMesh research server, since some of this SDK's contract only takes
 effect once a given server flag is on for your account.
 
+## [Unreleased]
+
+Targets the CNR lookup behaviour live on the server since 12 Nov 2026.
+
+### Changed
+
+- `get_case_by_cnr` with the default `fetch=None` now gets the server default: a CNR we do not hold is checked at the court's official source (eCourts for High Court and District Court, the Supreme Court website for Supreme Court CNRs). The first call returns `pending` (202), uncharged; polling returns the record (1 credit) or raises `NotFoundError` when the court reports no such case. On a plan without live fetch the default raises `NotFoundError` on a miss.
+- `get_case_by_cnr(cnr, fetch=False)` now sends `fetch=false`, so callers can opt out and get a plain `NotFoundError` on a miss. `fetch=None` (the new default, previously `False`) sends nothing. `fetch=True` is unchanged and still raises `PermissionDeniedError` (`LIVE_FETCH_NOT_ALLOWED`) on a plan without live fetch.
+- Supreme Court CNRs we do not hold are no longer always not found: lookups, watchlist adds and refresh check the Supreme Court website, which can take several minutes.
+- Documented the daily per account cap on new CNR checks: past it the call raises `RateLimitError` (`LIVE_FETCH_LIMIT_REACHED`), not retried automatically.
+
 ## [0.5.0]
 
 Adds CNR lookup and case monitoring (API docs 1.3.0).
