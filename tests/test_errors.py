@@ -167,7 +167,7 @@ def test_rate_limit_error_carries_distinct_names_limit_code(make_client):
 
 def test_request_timeout_error(make_client):
     client, mock_request = make_client()
-    mock_request.return_value = FakeResponse(408, {"success": False, "error": "Request timeout - OpenSearch query took too long"})
+    mock_request.return_value = FakeResponse(408, {"success": False, "error": "Request timeout - search took too long"})
 
     with pytest.raises(RequestTimeoutError):
         client.search_cases(query="x")

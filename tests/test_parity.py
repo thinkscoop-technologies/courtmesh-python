@@ -224,8 +224,33 @@ def test_api_refusal_codes_covers_handler_local_and_auth_codes():
         "MALFORMED_JSON",
         "PAYLOAD_TOO_LARGE",
         "INSUFFICIENT_API_CREDITS",
+        "ACT_NOT_FOUND",
+        "SECTION_NOT_FOUND",
+        "UPSTREAM_UNAVAILABLE",
     ):
         assert expected in API_REFUSAL_CODES
+
+
+def test_acts_and_sections_methods_exist_with_expected_signatures():
+    import inspect
+
+    from courtmesh import CourtMesh
+
+    expected = {
+        "search_acts": ["query", "doc_class", "jurisdiction", "year_from", "year_to", "page", "limit", "timeout"],
+        "resolve_act": ["query", "timeout"],
+        "get_act": ["slug", "timeout"],
+        "get_act_history": ["slug", "timeout"],
+        "list_act_sections": ["slug", "page", "limit", "timeout"],
+        "get_act_section": ["slug", "section_slug", "timeout"],
+        "list_section_citing_cases": ["slug", "section_slug", "cursor", "limit", "timeout"],
+        "iter_section_citing_cases": ["slug", "section_slug", "limit", "max_pages"],
+        "search_sections": ["query", "act", "number", "page", "limit", "timeout"],
+        "lookup_section": ["citation", "timeout"],
+    }
+    for name, params in expected.items():
+        method = getattr(CourtMesh, name)
+        assert [p for p in inspect.signature(method).parameters if p != "self"] == params, name
 
 
 # -- R1/R2/R3 retry policy ----------------------------------------------------

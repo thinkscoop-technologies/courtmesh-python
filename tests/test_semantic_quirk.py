@@ -1,6 +1,5 @@
-"""The semantic search transport quirk: the handler used to call
-`res.writeHead(200, ...)` before doing any real work, so failures after that
-point still arrived with HTTP 200 and `{"success": false, "error": "..."}`.
+"""The semantic search transport quirk: the server used to send
+HTTP 200 before doing any real work, so failures after that point still arrived with HTTP 200 and `{"success": false, "error": "..."}`.
 The server sends a proper non-200 status for this today, so these fixtures
 exercise a defensive fallback that should never trigger against the live
 server, not documented current behaviour. The SDK still checks `success`
@@ -14,8 +13,8 @@ from helpers import FakeResponse
 @pytest.mark.parametrize(
     "error_message",
     [
-        "Failed to generate query embedding",
-        "Vector search failed",
+        "Semantic search failed",
+        "Search failed",
         "Failed to fetch results from search API",
     ],
 )
@@ -31,18 +30,18 @@ def test_semantic_search_raises_on_success_false_with_http_200(make_client, erro
     assert excinfo.value.status_code == 200
 
 
-def test_semantic_search_fallback_mode_returns_raw_opensearch_hits(make_client, envelope):
+def test_semantic_search_fallback_mode_returns_raw_search_hits(make_client, envelope):
     client, mock_request = make_client()
     body = envelope(
         data=[{"_id": "1", "title": "Fallback hit"}],
-        meta={"query": "ab", "responseTime": "1ms", "fallbackMode": "opensearch"},
+        meta={"query": "ab", "responseTime": "1ms", "fallbackMode": "keyword"},
         pagination={"page": 1, "limit": 20, "total": 1, "totalPages": 1, "hasMore": False},
     )
     mock_request.return_value = FakeResponse(200, body)
 
     result = client.semantic_search(query="ab")
 
-    assert result.meta["fallbackMode"] == "opensearch"
+    assert result.meta["fallbackMode"] == "keyword"
     assert result.data[0]["title"] == "Fallback hit"
 
 

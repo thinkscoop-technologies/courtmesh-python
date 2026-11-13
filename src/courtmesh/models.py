@@ -33,11 +33,10 @@ class SearchCasesPagination(TypedDict, total=False):
     """Pagination block returned by POST /search/cases.
 
     `page` is absent once cursor pagination has taken over. `totalPages`
-    does not exist on this endpoint. `nextCursor` has two shapes depending
-    on whether the API self-serve tiers flag is on for the account:
-    a signed, opaque string (pass it back as `cursor`) when it is on, or the
-    legacy raw OpenSearch sort tuple (an array, pass it back as a JSON
-    encoded `searchAfter` string) when it is off. Either way, `None` means
+    does not exist on this endpoint. `nextCursor` has two shapes:
+    a signed, opaque string (pass it back as `cursor`), or the
+    legacy raw sort tuple (an array, pass it back as a JSON
+    encoded `searchAfter` string). Either way, `None` means
     there is no next page.
     """
 
@@ -67,11 +66,11 @@ class SemanticSearchPagination(TypedDict, total=False):
 
 
 class Envelope(TypedDict, total=False):
-    """Raw shape of `successResponse` / handler error bodies.
+    """Raw shape of API response bodies.
 
     `meta` and `pagination` are only present when the handler supplies
     them. On error, `success` is False and `error` (plus optionally
-    `details`, for zod validation failures) is set instead of `data`.
+    `details`, for validation failures) is set instead of `data`.
     """
 
     success: bool
@@ -94,10 +93,11 @@ class APIResponse(Generic[T]):
         replayed: `True` only when this call sent an `idempotency_key` that
             matched a previous request within its 24 hour window: the
             server returned the stored response instead of doing the work
-            again, and nothing was charged. Only ever set on the five
-            idempotency-key-aware methods (`screen_party`,
-            `screen_party_batch`, `analyze_case`, `analyze_consolidated`,
-            `request_timeline`); `None` on every other response.
+            again, and nothing was charged. Only ever set on the
+            idempotency-key-aware methods (for example `screen_party`,
+            `screen_party_batch`, `build_party_profile`, `analyze_case`,
+            `analyze_consolidated`, `request_timeline`); `None` on every
+            other response.
     """
 
     data: T
@@ -118,19 +118,49 @@ class JudgeSearchMeta(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
+# Shared case shapes (API 1.8.0)
+# ---------------------------------------------------------------------------
+
+
+class SameMatterEntry(TypedDict, total=False):
+    """Another order or document of the same Supreme Court matter. Fetch it
+    by `caseId` like any case. Only `caseId` is always present."""
+
+    caseId: str
+    caseType: str
+    #: Date and time, or `None`.
+    decisionDate: Optional[str]
+
+
+class CourtRecordAct(TypedDict):
+    """An act and its sections as the court record states them. The act
+    name is as the court wrote it."""
+
+    act: str
+    sections: List[str]
+
+
+class CourtRecordFir(TypedDict, total=False):
+    """The FIR a district case arose from, as the court record states it.
+    Each field is left out when the court has not recorded it."""
+
+    firNumber: str
+    firYear: str
+    policeStation: str
+
+
+# ---------------------------------------------------------------------------
 # 2. POST /search/cases
 # ---------------------------------------------------------------------------
 
 
 class CaseListItem(TypedDict, total=False):
-    """One OpenSearch hit: `_source` fields plus `id`/`score` (the
+    """One search hit: the stored document fields plus `id`/`score` (the
     documented contract names; `_id`/`_score` are the legacy field names,
     kept for backwards compatibility).
 
     Every field is optional, presence varies per document. Note that
-    `detailedSummary`, `holding`, `keyFacts_joined`, `legalIssues_joined`
-    and `courtsReasoning` are indexed but excluded from `_source`, so they
-    never appear here.
+    analysis fields such as `detailedSummary` and `holding` never appear here.
     """
 
     id: str
@@ -172,6 +202,11 @@ class CaseListItem(TypedDict, total=False):
     precedentValue: str
     createdAt: str
     updatedAt: str
+    #: Supreme Court only: the other orders and documents of the same
+    #: matter, newest first. Rows are grouped by matter within a page, so a
+    #: page can hold fewer rows than `limit`; page with `nextCursor`, not
+    #: the row count.
+    sameMatter: List[SameMatterEntry]
 
 
 class SearchCasesFilters(TypedDict, total=False):
@@ -204,15 +239,32 @@ class SearchCasesMeta(TypedDict, total=False):
     responseTime: str
 
 
+class SearchCnrLookup(TypedDict, total=False):
+    """`cnr_lookup` on a `search_cases(cnr=...)` result that returned no
+    case: what is happening with that CNR.
+
+    `status` is `pending` (a court check is running; `requestId` is the
+    check as `get_case_by_cnr` reports it), `not_found`, `cooldown`,
+    `limit_reached` or `unavailable`. `cnr` and `status` are always present.
+    """
+
+    cnr: str
+    status: str
+    requestId: str
+
+
 @dataclass
 class SearchCasesResult:
-    """Result of `search_cases`, one page of raw OpenSearch hits."""
+    """Result of `search_cases`, one page of raw search hits."""
 
     data: List[CaseListItem]
     meta: SearchCasesMeta
     pagination: SearchCasesPagination
     #: See `APIResponse.request_id`.
     request_id: Optional[str] = None
+    #: The top level `cnrLookup` of the response, present only on a `cnr`
+    #: search that returned no case. `None` otherwise.
+    cnr_lookup: Optional[SearchCnrLookup] = None
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +273,7 @@ class SearchCasesResult:
 
 
 class SemanticSearchResultItem(TypedDict, total=False):
-    """One watermarked semantic search result. `similarity` is the Qdrant score."""
+    """One watermarked semantic search result. `similarity` is the relevance score."""
 
     id: str
     caseNumber: str
@@ -237,6 +289,9 @@ class SemanticSearchResultItem(TypedDict, total=False):
     hasDocuments: bool
     hasAnalysis: bool
     similarity: float
+    #: Supreme Court only: the other orders and documents of the same
+    #: matter. See `CaseListItem.sameMatter`.
+    sameMatter: List[SameMatterEntry]
 
 
 class SemanticSearchMeta(TypedDict, total=False):
@@ -268,7 +323,7 @@ class SemanticSearchResult:
     """Result of `semantic_search`.
 
     `data` holds `SemanticSearchResultItem` objects, unless
-    `meta["fallbackMode"] == "opensearch"`, in which case it holds raw
+    `meta["fallbackMode"]` is set, in which case it holds raw
     `CaseListItem` hits, see `SemanticSearchMeta`.
     """
 
@@ -322,6 +377,97 @@ class CaseDetails(TypedDict, total=False):
     hasDocuments: bool
     documentCount: int
     hasAnalysis: bool
+    #: Tribunal cases only: the bench that heard the matter, for example
+    #: `Delhi` for an ITAT appeal. Absent when the record does not name one.
+    bench: str
+    #: Acts and sections as the court record states them. Separate from the
+    #: acts found by analysis of the judgment. Absent when the record lists
+    #: none, on a protected matter, or on a district case not yet fetched
+    #: from the court.
+    courtRecordActs: List[CourtRecordAct]
+    #: District cases only: FIR details as the court record states them,
+    #: under the same rule as `courtRecordActs`.
+    courtRecordFir: List[CourtRecordFir]
+
+
+class CaseAdvocates(TypedDict):
+    petitioner: List[str]
+    respondent: List[str]
+
+
+class CaseHearing(TypedDict):
+    businessDate: Optional[str]
+    hearingDate: Optional[str]
+    purpose: Optional[str]
+    judge: Optional[str]
+    causeListType: Optional[str]
+
+
+class _CaseDocumentRowRequired(TypedDict):
+    id: str
+    kind: str
+    date: Optional[str]
+    orderNumber: Optional[str]
+    textAvailable: bool
+    pdfAvailable: bool
+
+
+class CaseDocumentRow(_CaseDocumentRowRequired, total=False):
+    #: Present only when `textAvailable` is False: `no_text` (no readable
+    #: text is held for this document) or `not_published` (the text of this
+    #: case is not offered on the API).
+    unavailableReason: str
+
+
+class _CaseDocumentsRequired(TypedDict):
+    caseId: str
+    documents: List[CaseDocumentRow]
+
+
+class CaseDocuments(_CaseDocumentsRequired, total=False):
+    #: Present and True when the text of this case is not offered on the
+    #: API. Every row then reads `textAvailable: False` and
+    #: `pdfAvailable: False`.
+    ordersTextWithheld: bool
+    #: `not_published`, present with `ordersTextWithheld`.
+    withheldReason: str
+
+
+class CaseDocumentText(TypedDict):
+    caseId: str
+    documentId: str
+    kind: str
+    date: Optional[str]
+    orderNumber: Optional[str]
+    textAvailable: bool
+    text: Optional[str]
+    textLength: int
+    textTruncated: bool
+    pdfAvailable: bool
+
+
+class CnrRefreshResult(TypedDict):
+    input: str
+    cnr: Optional[str]
+    status: str
+    caseId: Optional[str]
+    lastRefreshedAt: Optional[str]
+
+
+class CnrRefreshBatchSummary(TypedDict):
+    requested: int
+    started: int
+
+
+class CnrRefreshBatch(TypedDict):
+    results: List[CnrRefreshResult]
+    summary: CnrRefreshBatchSummary
+
+
+class CnrRefreshState(TypedDict):
+    cnr: str
+    state: str
+    lastRefreshedAt: Optional[str]
 
 
 class CaseDetailsMeta(TypedDict, total=False):
@@ -380,8 +526,7 @@ class CaseAnalysis(TypedDict, total=False):
 class ConsolidatedAnalysis(CaseAnalysis, total=False):
     """Same keys as `CaseAnalysis` plus the consolidated-only fields.
 
-    Internal `analysisModel` / `analysisVersion` / `analysisDate` fields
-    are stripped by the server and never appear here.
+    Internal metadata is stripped by the server and never appears here.
     """
 
     benchComposition: Any
@@ -595,14 +740,12 @@ class HealthResponse(TypedDict, total=False):
     """Body of GET /health. Not enveloped in `data`, unlike every other
     endpoint.
 
-    `commit` is the deployed commit SHA, or `None` when the server has no
-    `GIT_SHA` set. `checks` is present only when `deep=True` was passed to
-    `health()`: one entry per dependency (Mongo, OpenSearch, Qdrant, Redis,
-    IAM), each a bare status string in production - see `HealthCheckEntry`.
+    `commit` is the deployed commit SHA, or `None` when the server does not
+    report one. `checks` is present only when `deep=True` was passed to
+    `health()`: one entry per dependency, each a bare status string in production - see `HealthCheckEntry`.
     `status` is `"healthy"` on the plain form; the deep form's `status` is
     one of `"healthy"`, `"degraded"` or `"unhealthy"` (the last one only
-    alongside HTTP 503, meaning a hard dependency - Mongo or OpenSearch - is
-    down).
+    alongside HTTP 503, meaning a hard dependency is down).
     """
 
     success: bool
@@ -700,6 +843,14 @@ class PartyScreenMatch(TypedDict, total=False):
     confidence: PartyScreenConfidence
     evidence: PartyScreenEvidence
     rationale: str
+    #: Acts and sections as the court record states them, separate from
+    #: `acts` and `sections` (which come from analysis of the judgment).
+    #: Never present on a protected matter.
+    courtRecordActs: List[CourtRecordAct]
+    #: District cases only: FIR details as the court record states them.
+    courtRecordFir: List[CourtRecordFir]
+    #: Supreme Court only: the other orders and documents of the same matter.
+    sameMatter: List[SameMatterEntry]
 
 
 class PartyScreenRelatedMatch(TypedDict, total=False):
@@ -844,6 +995,388 @@ class PartyScreenMeta(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
+# POST /party/profile and GET /party/profile/{requestId} (API 1.8.0)
+# ---------------------------------------------------------------------------
+
+
+class PartyProfileWebhook(TypedDict, total=False):
+    """`webhook` on a full mode request. `url` is required and must be a
+    public https address with no credentials in it. `headers` (at most 20)
+    are sent with the notice, for example your own `Authorization`."""
+
+    url: str
+    headers: Dict[str, str]
+
+
+class PartyProfileCountCredits(TypedDict):
+    count: int
+    credits: int
+
+
+class PartyProfileCredits(TypedDict):
+    credits: int
+
+
+class PartyProfileTokensCredits(TypedDict):
+    tokens: int
+    credits: int
+
+
+class _PartyProfileCreditsBreakdownRequired(TypedDict):
+    searches: PartyProfileCountCredits
+    caseRecords: PartyProfileCountCredits
+    documentLists: PartyProfileCountCredits
+
+
+class PartyProfileCreditsBreakdown(_PartyProfileCreditsBreakdownRequired, total=False):
+    """`meta["creditsBreakdown"]` of a quick profile: what each part cost.
+    `aiReview` is present only when the AI review was charged, and
+    `minimumCharge` only when the call used less than the minimum (the
+    top up, so the parts add up to `meta["creditsCharged"]`)."""
+
+    aiReview: PartyProfileCountCredits
+    minimumCharge: PartyProfileCredits
+
+
+class PartyProfileMeta(TypedDict, total=False):
+    """`meta` of a quick profile. `creditsCharged` is what left the wallet,
+    0 whenever `metered` is False."""
+
+    creditsCharged: int
+    metered: bool
+    creditsBreakdown: PartyProfileCreditsBreakdown
+    adjudicated: bool
+    corpusAsOf: str
+    responseTime: str
+    requestId: str
+
+
+class PartyProfileSubject(TypedDict, total=False):
+    """`name` and `entityType` are always present; `aliases` only when the
+    request gave some."""
+
+    name: str
+    entityType: str
+    aliases: List[str]
+
+
+class PartyProfileByRole(TypedDict, total=False):
+    petitioner: int
+    respondent: int
+    unknown: int
+
+
+class PartyProfileSummary(TypedDict, total=False):
+    """`profile` of an identity, built by code from the returned cases (no
+    model). Counts of zero, empty lists and unknown dates are left out;
+    `pending` and `disposed` are always present."""
+
+    summary: str
+    byCourtType: Dict[str, int]
+    byRole: PartyProfileByRole
+    pending: int
+    disposed: int
+    statusUnknown: int
+    categories: List[str]
+    flags: List[str]
+    #: YYYY-MM-DD.
+    firstSeen: str
+    #: YYYY-MM-DD.
+    lastActivity: str
+
+
+class PartyProfileDocumentLinks(TypedDict, total=False):
+    """`text` is the path of the text endpoint relative to the API base, or
+    `None` when the text is not offered. `pdf` is a download URL valid for
+    one hour that needs no API key, or `None`; the first time it is opened it
+    is charged as one PDF call to the key that read the profile, free after
+    that. `pdfExpiresAt` is present only with a link."""
+
+    text: Optional[str]
+    pdf: Optional[str]
+    pdfExpiresAt: str
+
+
+class PartyProfileDocument(TypedDict):
+    """One document held for a case, never its body. `kind` is
+    `case_document` or `order`; `date` is YYYY-MM-DD or `None`."""
+
+    documentId: str
+    kind: str
+    date: Optional[str]
+    links: PartyProfileDocumentLinks
+
+
+class PartyProfileCourtRefresh(TypedDict, total=False):
+    """Full mode only. `status` is one of `refreshed`, `already_current`,
+    `recently_refreshed`, `not_supported_for_this_court`, `not_available`,
+    `not_found_at_court`, `no_cnr`, `in_progress`, `failed`, `timed_out`,
+    `not_started`. `attempts` is present only when more than one try was
+    made."""
+
+    status: str
+    attempts: int
+
+
+class PartyProfileCaseAnalysis(TypedDict, total=False):
+    """Full mode only. `status` is `new`, `updated`, `existing`, `short`
+    (written for this request only because `maxCredits` could not cover a
+    full analysis of every case) or `not_done` (with a `reason`)."""
+
+    status: str
+    summary: str
+    outcome: Optional[str]
+    issues: List[str]
+    analysedAt: str
+    reason: str
+
+
+class PartyProfileCase(TypedDict, total=False):
+    """One case of the primary identity. Fields with no value are left out.
+    `caseId`, `partyRole`, `status`, `decisionDate` (None for a pending
+    case) and `confidence` are always present. `caseNumber` is given only
+    when it differs from `cnr`."""
+
+    caseId: str
+    cnr: str
+    caseNumber: str
+    court: str
+    courtType: str
+    #: Tribunal cases only: the bench that heard the matter.
+    bench: str
+    caseType: str
+    title: str
+    petitioners: List[str]
+    respondents: List[str]
+    #: `petitioner`, `respondent` or `unknown`.
+    partyRole: str
+    #: `pending`, `disposed` or `unknown`.
+    status: str
+    filingDate: str
+    nextHearingDate: str
+    decisionDate: Optional[str]
+    disposalNature: str
+    #: Acts from analysis of the judgment, when `include` has `acts`.
+    acts: List[str]
+    sections: List[str]
+    courtRecordActs: List[CourtRecordAct]
+    #: District cases only.
+    courtRecordFir: List[CourtRecordFir]
+    #: Supreme Court only.
+    sameMatter: List[SameMatterEntry]
+    #: `confirmed`, `probable`, `possible` or `unlikely`.
+    confidence: str
+    matchReasons: List[str]
+    #: Newest first, when `include` has `documents` and the listing was read.
+    documents: List[PartyProfileDocument]
+    documentsNote: str
+    #: Present (and True) only when the case holds more documents than one
+    #: listing carries.
+    documentsMore: bool
+    courtRefresh: PartyProfileCourtRefresh
+    analysis: PartyProfileCaseAnalysis
+
+
+class PartyProfileIdentity(TypedDict, total=False):
+    """The primary identity: the cases judged to belong to the person or
+    company asked about. `confidence` is the band of its strongest case."""
+
+    confidence: str
+    why: List[str]
+    caseCount: int
+    profile: PartyProfileSummary
+    cases: List[PartyProfileCase]
+
+
+class PartyProfileOtherCase(TypedDict, total=False):
+    """Basic facts of one case of another identity, at no extra cost. Only
+    `caseId` is always present; `get_case` gives the case in full."""
+
+    caseId: str
+    cnr: str
+    caseNumber: str
+    court: str
+    caseType: str
+    title: str
+    petitioners: List[str]
+    respondents: List[str]
+    partyRole: str
+    filingDate: str
+    decisionDate: str
+    disposalNature: str
+
+
+class PartyProfileOtherIdentity(TypedDict, total=False):
+    """An identity other than the primary, listed under
+    `possibleOtherPeople`. `why` says why it was kept apart."""
+
+    confidence: str
+    why: List[str]
+    caseCount: int
+    caseIds: List[str]
+    cases: List[PartyProfileOtherCase]
+
+
+class PartyProfileKeyRisk(TypedDict):
+    risk: str
+    caseIds: List[str]
+
+
+class PartyProfileNotableCase(TypedDict):
+    caseId: str
+    why: str
+
+
+class PartyProfileOpenMatter(TypedDict):
+    caseId: str
+    note: str
+
+
+class PartyProfileAnalysis(TypedDict):
+    """Full mode only: one analysis of the person or company, written by a
+    model from this profile's own court record facts and case analyses.
+    Every case id in it is a case of this profile. Being a party to a case
+    is not a finding against anyone."""
+
+    overview: str
+    litigationPattern: str
+    keyRisks: List[PartyProfileKeyRisk]
+    notableCases: List[PartyProfileNotableCase]
+    openMatters: List[PartyProfileOpenMatter]
+    caveats: List[str]
+
+
+class PartyProfileResult(TypedDict, total=False):
+    """`data` of a quick profile, and `result` of a completed full mode
+    request.
+
+    `verdict` is `identity_found`, `no_confirmed_identity`,
+    `no_matches_found` or `inconclusive`. `identities` holds the primary
+    identity in full, and is empty when none reaches `minConfidence`.
+    `notes` is always present and lists anything left out (empty when
+    nothing was). `partyAnalysis` is full mode only, and `None` when it
+    could not be written (`notes` says why).
+    """
+
+    subject: PartyProfileSubject
+    verdict: str
+    summary: str
+    identities: List[PartyProfileIdentity]
+    possibleOtherPeople: List[PartyProfileOtherIdentity]
+    relatedButUnverified: List[PartyScreenRelatedMatch]
+    partyAnalysis: Optional[PartyProfileAnalysis]
+    notes: List[str]
+    notice: str
+
+
+class PartyProfileAcceptedWebhook(TypedDict, total=False):
+    """`signingSecret` is shown once: store it to check the
+    `CourtMesh-Signature` header of the completion notice."""
+
+    signingSecret: str
+    note: str
+
+
+class PartyProfileAccepted(TypedDict, total=False):
+    """`data` of the 202 answer to a full mode request. Nothing is charged
+    yet. `status` is `queued`; read the request with `get_party_profile`.
+    `webhook` is present only when the request carried one."""
+
+    requestId: str
+    mode: str
+    status: str
+    statusUrl: str
+    maxCredits: int
+    webhook: PartyProfileAcceptedWebhook
+
+
+class PartyProfileProgress(TypedDict):
+    casesFound: int
+    refreshesStarted: int
+    refreshesFinished: int
+    casesAnalysed: int
+    casesNotAnalysed: int
+    #: `pending`, `done` or `not_done`.
+    partyAnalysis: str
+
+
+class PartyProfileCaseAnalysesCredits(TypedDict):
+    full: int
+    short: int
+    existing: int
+    tokens: int
+    credits: int
+
+
+class _PartyProfileStageBreakdownRequired(TypedDict):
+    search: PartyProfileCredits
+    courtRefreshes: PartyProfileCountCredits
+    caseAnalyses: PartyProfileCaseAnalysesCredits
+    partyAnalysis: PartyProfileTokensCredits
+
+
+class PartyProfileStageBreakdown(_PartyProfileStageBreakdownRequired, total=False):
+    minimumCharge: PartyProfileCredits
+
+
+class _PartyProfileRequestCreditsRequired(TypedDict):
+    charged: int
+    maxCredits: int
+    breakdown: PartyProfileStageBreakdown
+
+
+class PartyProfileRequestCredits(_PartyProfileRequestCreditsRequired, total=False):
+    """`charged` is what has left the wallet for this request so far.
+    `unconfirmed` is True while the outcome of a debit is not yet confirmed,
+    so `charged` may still rise by that stage."""
+
+    unconfirmed: bool
+
+
+class PartyProfileWebhookState(TypedDict):
+    #: `pending`, `delivered` or `failed`.
+    state: str
+    attempts: int
+
+
+class PartyProfileFailure(TypedDict):
+    """`code` is one of `INTERNAL_ERROR`, `PARTY_SCREEN_SEARCH_DEGRADED`,
+    `INSUFFICIENT_CREDITS`, `SETTLEMENT_UNCONFIRMED`, `API_KEY_INACTIVE`,
+    `PROFILE_FAILED`."""
+
+    code: str
+    message: str
+
+
+class PartyProfileRequestStatus(TypedDict, total=False):
+    """`data` of `GET /party/profile/{requestId}`.
+
+    `status` is `queued`, `running`, `completed` or `failed`. `stage` is
+    present while queued or running (`find`, `refresh`, `await_refresh`,
+    `reread`, `analyse`, `review`, `finish`). `result` is present once
+    `status` is `completed` and the result has not expired; after 30 days
+    `resultExpired` is True and only the status, progress and credits
+    remain. `failure` is present on a failed request, and what it was
+    charged before failing stays in `credits`.
+    """
+
+    requestId: str
+    mode: str
+    status: str
+    stage: str
+    progress: PartyProfileProgress
+    createdAt: str
+    startedAt: Optional[str]
+    finishedAt: Optional[str]
+    resultExpiresAt: Optional[str]
+    credits: PartyProfileRequestCredits
+    webhook: PartyProfileWebhookState
+    failure: PartyProfileFailure
+    resultExpired: bool
+    result: PartyProfileResult
+
+
+# ---------------------------------------------------------------------------
 # 14. GET /coverage
 # ---------------------------------------------------------------------------
 
@@ -869,14 +1402,13 @@ class CoverageCourt(TypedDict, total=False):
     documentBearing: int
     earliestDecisionDate: Optional[str]
     latestDecisionDate: Optional[str]
-    #: How many business days behind live filings this court's index
-    #: appears to be. `None` when it cannot be computed.
+    #: How many business days behind live filings this court's records
+    #: appear to be. `None` when it cannot be computed.
     businessDaysBehind: Optional[int]
 
 
 class CoverageDistrictCourts(TypedDict, total=False):
-    """District Courts are reported as a single rolled up row, the index
-    has no per-state field."""
+    """District Courts are reported as a single rolled up row."""
 
     records: int
     documentBearing: int
@@ -887,13 +1419,7 @@ class CoverageDistrictCourts(TypedDict, total=False):
 class CoverageData(TypedDict, total=False):
     """Body of GET /coverage.
 
-    Only these fields are ever returned - the server's
-    `sanitizeCoverageResponse` strips every other field the raw OpenSearch
-    coverage response carries (operational bookkeeping such as
-    `byYearMissing`, `sumOtherDocCount`, `docCountErrorUpperBound`, an
-    upstream `ageSeconds`, and the refresh job's own job status) before this
-    is ever cached or served - confirmed against the redeployed OpenAPI spec
-    and a live call 2026-09-19.
+    Only these fields are ever returned.
     """
 
     generatedAt: str
@@ -951,22 +1477,15 @@ class UsageBalance(TypedDict, total=False):
 
 
 class UsageTierLimits(TypedDict, total=False):
-    """Mirrors the server's `TierLimits` (server/config/api-tiers.ts).
+    """Mirrors the per tier limits the API reports.
     `-1` means unlimited on any per period field for a tier that has a
     numbered cap.
 
-    `limits` itself is always a populated object (verified live and in the
-    redeployed OpenAPI spec, `data["limits"]` is required and never `None`).
-    Live-verified 2026-09-19 on an Enterprise key with the API self-serve
-    tiers flag off: `requestsPerMinute` is 10, the flat legacy ceiling
-    actually enforced right now (matches `X-RateLimit-Limit`); `published`
-    is this tier's documented number (600 for enterprise) from the "Rate
-    limits and per-IP limits" table, whether or not it is the one enforced
-    yet; and every other field came back `None`, not `-1` and not
-    `True`/`False` - this tier apparently has no configured cap at all for
-    those fields with the flag off. `requestsPerMinute` and `published`
-    converge once self serve tiers are enabled. Every field except
-    `requestsPerMinute` and `published` is typed `Optional` to match; treat
+    `limits` itself is always a populated object, `data["limits"]` is
+    required and never `None`. `requestsPerMinute` is the limit applied to
+    this key (matches `X-RateLimit-Limit`); `published` is this tier's
+    documented number from the "Rate limits and per-IP limits" table. Every field except `requestsPerMinute` and
+    `published` is typed `Optional`; treat
     `None` the same as `-1`/unlimited (or "allowed") unless you have
     evidence a given tier distinguishes the two.
     """
@@ -986,8 +1505,7 @@ class UsageTierLimits(TypedDict, total=False):
     liveFetchesPerDay: Optional[int]
     analysisReadAllowed: Optional[bool]
     partyScreensPerMonth: Optional[int]
-    #: This tier's number in the OpenAPI rate-limit table, whether or not it
-    #: is the one `requestsPerMinute` currently enforces. Added 2026-09-19.
+    #: This tier's number in the OpenAPI rate-limit table. Added 2026-09-19.
     published: int
 
 
@@ -1021,8 +1539,7 @@ class UsageData(TypedDict, total=False):
 
 class UsageMeta(TypedDict, total=False):
     requestId: str
-    #: Live-verified 2026-09-19, undocumented until now: whether this
-    #: account is on the API self-serve tiers flag.
+    #: Whether this account is self serve.
     selfServe: bool
 
 
@@ -1079,7 +1596,7 @@ class AuditSummary(TypedDict, total=False):
     totalAiAnalysisHits: int
     avgResponseTime: float
     successfulHits: int
-    #: A string, e.g. `"98.5"` - the server formats it with `toFixed(1)`.
+    #: A string, e.g. `"98.5"` with one decimal place.
     successRate: str
     totalCreditsDeducted: int
 
@@ -1106,6 +1623,20 @@ class AuditResult:
     data: AuditData
     pagination: AuditPagination
     request_id: Optional[str] = None
+
+
+class AuditDeleteResult(TypedDict, total=False):
+    """`data` of `DELETE /audit`.
+
+    `before` is the time used, in UTC. `removed` counts the calls removed
+    from `audit()` by this request. `complete` is False when part is left:
+    send the same request again to finish.
+    """
+
+    before: str
+    removed: int
+    complete: bool
+    note: str
 
 
 # ---------------------------------------------------------------------------
@@ -1231,7 +1762,7 @@ class CnrLookup(TypedDict, total=False):
 
     cnr: str
     status: str
-    case: Optional[Dict[str, Any]]
+    case: Optional[CaseDetails]
     requestId: Optional[str]
 
 
@@ -1326,6 +1857,10 @@ class ChangeEvent(TypedDict, total=False):
     caseId: Optional[str]
     watchlists: List[ChangeEventWatchlistRef]
     data: Dict[str, Any]
+    #: `case_restricted`, present only when the case was removed after this
+    #: event was recorded. The event keeps its place in the feed, with
+    #: `data` empty and `caseId` None.
+    withheld: str
 
 
 class Webhook(TypedDict, total=False):
@@ -1359,3 +1894,220 @@ class WebhookDelivery(TypedDict, total=False):
     lastResponseStatus: Optional[int]
     lastError: Optional[str]
     createdAt: str
+
+
+# ---------------------------------------------------------------------------
+# Acts and sections (0.6.0). These endpoints need the `legislation` scope.
+# Each call costs 1 credit when it returns something and nothing when it
+# returns nothing. Repeal status is on every act and provision: check it
+# before relying on one.
+# ---------------------------------------------------------------------------
+
+
+class ActsPagePagination(TypedDict, total=False):
+    """Pagination of the page numbered acts endpoints. `total` counts matches
+    before unpublished records are removed, so a page can hold fewer rows
+    than `limit`."""
+
+    page: int
+    limit: int
+    total: int
+    totalPages: int
+    hasMore: bool
+
+
+class ActSummary(TypedDict, total=False):
+    slug: str
+    title: str
+    docClass: str
+    year: Optional[int]
+    number: Optional[str]
+    citation: Optional[str]
+    jurisdiction: str
+    stateName: Optional[str]
+    #: Short forms this act is known by.
+    aliases: List[str]
+    #: Whether the act has been repealed. Check this before relying on it.
+    repealed: bool
+    #: What repealed it, and from when.
+    repealNote: Optional[str]
+
+
+class Act(ActSummary, total=False):
+    shortTitle: Optional[str]
+    longTitle: Optional[str]
+    ministryName: Optional[str]
+    subjects: List[str]
+    #: ``sections`` has a table of contents. ``full-text`` was published only as
+    #: one document, so it has no provisions to list.
+    textSource: str
+    sectionCount: int
+    #: A caveat about how the text was extracted, when there is one.
+    textNote: Optional[str]
+
+
+class ActMatch(TypedDict, total=False):
+    act: ActSummary
+    #: ``short_form`` is an exact match on a known short form, otherwise ``text``.
+    matchedBy: str
+
+
+class ActResolution(TypedDict, total=False):
+    """`data` of `resolve_act`: up to five candidates, best first."""
+
+    query: str
+    matches: List[ActMatch]
+
+
+class ActAmendment(TypedDict, total=False):
+    slug: Optional[str]
+    title: str
+    year: Optional[int]
+    number: Optional[str]
+    citation: Optional[str]
+    sourceUrl: Optional[str]
+
+
+class ActHistory(TypedDict, total=False):
+    """`data` of `get_act_history`. Act level only: it does not map old
+    sections to new ones."""
+
+    slug: str
+    #: What repealed this act. Empty when no repeal is recorded.
+    succession: List[Dict[str, Any]]
+    amendments: List[ActAmendment]
+    #: Amendments made by a State, which apply only in that State.
+    stateAmendments: List[Dict[str, Any]]
+    editions: List[Dict[str, Any]]
+    #: Rules, regulations and notifications made under the act, up to 100 of each kind.
+    instruments: List[Dict[str, Any]]
+    #: How many instruments of each kind exist, which can exceed what is listed.
+    instrumentCounts: Dict[str, int]
+
+
+class ActSectionEntry(TypedDict, total=False):
+    """One provision in an act's table of contents."""
+
+    actSlug: str
+    slug: str
+    partType: str
+    number: Optional[str]
+    heading: Optional[str]
+    #: Judgments recorded as citing this provision. Not an exhaustive count.
+    citationCount: int
+    #: Whether this provision on its own was repealed. See `actRepealed` for the act.
+    repealedProvision: bool
+
+
+class SectionRow(ActSectionEntry, total=False):
+    """A provision with its act, as returned by `search_sections` and `lookup_section`."""
+
+    actTitle: Optional[str]
+    actYear: Optional[int]
+    jurisdiction: Optional[str]
+    stateName: Optional[str]
+    #: Whether the act this provision belongs to was repealed.
+    actRepealed: bool
+    actRepealNote: Optional[str]
+    #: Present on search results.
+    snippet: str
+
+
+class ActSectionBlock(TypedDict, total=False):
+    depth: int
+    kind: str
+    marker: Optional[str]
+    text: str
+
+
+class ActSectionAmendment(TypedDict, total=False):
+    action: str
+    note: str
+    byInstrument: Optional[str]
+    byYear: Optional[int]
+
+
+class ActSection(SectionRow, total=False):
+    """`data` of `get_act_section`."""
+
+    textNote: Optional[str]
+    #: The whole provision as plain text.
+    text: str
+    #: The same text with its structure: subsections, clauses, provisos, explanations.
+    blocks: List[ActSectionBlock]
+    amendments: List[ActSectionAmendment]
+    previous: Optional[Dict[str, Any]]
+    next: Optional[Dict[str, Any]]
+
+
+class SectionMatch(TypedDict, total=False):
+    section: SectionRow
+    #: ``alias``, ``title`` or ``number_only``.
+    matchedBy: str
+    #: True when no act was named, so this is one of many provisions with that
+    #: number. Choose or name the act.
+    ambiguous: bool
+
+
+class SectionLookup(TypedDict, total=False):
+    """`data` of `lookup_section`: provisions the citation could name, best first."""
+
+    query: str
+    matches: List[SectionMatch]
+
+
+class CitingCase(TypedDict, total=False):
+    #: Read the judgment with `get_case(id)`.
+    id: str
+    title: Optional[str]
+    court: Optional[str]
+    courtType: Optional[str]
+    cnr: Optional[str]
+    caseNumber: Optional[str]
+    #: ISO date.
+    decisionDate: Optional[str]
+
+
+class CitingCases(TypedDict, total=False):
+    """`data` of `list_section_citing_cases`: judgments citing exactly one
+    provision, newest first. Not an exhaustive list of every judgment applying
+    the provision, and an empty list does not mean no judgment applied it.
+    Some matters are never listed."""
+
+    section: Dict[str, Any]
+    #: False for a provision we do not list judgments for, including sexual
+    #: offences and cruelty provisions. That says nothing about whether any exist.
+    listAvailable: bool
+    note: str
+    #: A page can hold fewer rows than `limit`, or none, while
+    #: `pagination["hasMore"]` is true. Keep following `nextCursor`.
+    cases: List[CitingCase]
+
+
+@dataclass
+class ActsPageResult(Generic[T]):
+    """One page of a page numbered acts endpoint (`search_acts`,
+    `list_act_sections`, `search_sections`)."""
+
+    data: List[T]
+    meta: Dict[str, Any]
+    pagination: ActsPagePagination
+    #: See `APIResponse.request_id`.
+    request_id: Optional[str] = None
+
+
+@dataclass
+class CitingCasesResult:
+    """Result of `list_section_citing_cases`. `pagination` holds
+    `limit`, `hasMore` and `nextCursor`. A page can be empty while `hasMore`
+    is true."""
+
+    data: CitingCases
+    meta: Dict[str, Any]
+    pagination: CursorPagination
+    #: See `APIResponse.request_id`.
+    request_id: Optional[str] = None
+
+    @property
+    def next_cursor(self) -> Optional[str]:
+        return self.pagination.get("nextCursor")
