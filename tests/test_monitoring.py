@@ -15,7 +15,7 @@ from courtmesh import (
 )
 
 BASE = "https://research.courtmesh.ai/api/v1/prod"
-CNR = "DLHC010084212021"
+CNR = "ZZAB010000012024"
 
 
 def ok(data, **extra):
@@ -39,13 +39,13 @@ def call(mock_request, index=0):
 @pytest.mark.parametrize(
     "raw",
     [
-        "DLHC010084212021",
-        "  dlhc010084212021 ",
-        "CNR: DLHC-01-008421-2021",
-        "CNR DLHC01 008421 2021",
-        "CNR NO DLHC010084212021",
-        "cnr:dlhc/01/008421/2021",
-        "DLHC.01.008421.2021",
+        "ZZAB010000012024",
+        "  zzab010000012024 ",
+        "CNR: ZZAB-01-000001-2024",
+        "CNR ZZAB01 000001 2024",
+        "CNR NO ZZAB010000012024",
+        "cnr:zzab/01/000001/2024",
+        "ZZAB.01.000001.2024",
     ],
 )
 def test_normalize_cnr_accepts_common_spellings(raw):
@@ -53,12 +53,53 @@ def test_normalize_cnr_accepts_common_spellings(raw):
 
 
 def test_normalize_cnr_rejects_garbage():
-    for bad in ("", "DLHC01008421202", "DLHC0100842120211", "1234567890123456", None, 42):
+    for bad in ("", "ZZAB01000001202", "ZZAB0100000120241", "1234567890123456", None, 42):
         assert normalize_cnr(bad) is None
-    assert normalize_cnr("WBCHCA0113712023") == "WBCHCA0113712023"
+    assert normalize_cnr("ZZABCD0000012024") == "ZZABCD0000012024"
     with pytest.raises(ValueError):
         assert_cnr("nope")
-    assert assert_cnr("cnr: dlhc010084212021") == CNR
+    assert assert_cnr("cnr: zzab010000012024") == CNR
+
+
+# -- case depth and refresh ------------------------------------------------
+
+
+def test_include_is_sent_on_get_case_and_by_cnr(make_client):
+    client, mock = make_client()
+    mock.return_value = ok({"id": "c1"})
+    client.get_case("c1")
+    assert call(mock)[2]["params"] is None
+    client.get_case("c1", include=["hearings", "advocates"])
+    assert call(mock, 1)[2]["params"] == {"include": "hearings,advocates"}
+    client.get_case_by_cnr(CNR, fetch=True, include=["advocates"])
+    assert call(mock, 2)[2]["params"] == {"fetch": "true", "include": "advocates"}
+
+
+def test_orders_and_text_paths(make_client):
+    client, mock = make_client()
+    mock.return_value = ok({"caseId": "c1", "documents": []})
+    client.list_case_orders("c1")
+    assert call(mock)[1] == BASE + "/cases/c1/orders"
+    mock.return_value = ok({"textAvailable": False, "text": None})
+    res = client.get_case_document_text("c1", "d1")
+    assert call(mock, 1)[1] == BASE + "/cases/c1/orders/d1/text"
+    assert res.data["text"] is None
+
+
+def test_refresh_state_and_batch(make_client):
+    client, mock = make_client()
+    mock.return_value = FakeResponse(202, {"success": True, "data": {"input": CNR, "cnr": CNR, "status": "queued"}})
+    res = client.refresh_case_by_cnr("cnr: zzab-01-000001-2024")
+    method, url, _ = call(mock)
+    assert (method, url) == ("POST", BASE + "/cases/by-cnr/" + CNR + "/refresh")
+    assert res.data["status"] == "queued"
+    mock.return_value = ok({"cnr": CNR, "state": "running", "lastRefreshedAt": None})
+    client.get_case_refresh_state(CNR)
+    assert call(mock, 1)[:2] == ("GET", BASE + "/cases/by-cnr/" + CNR + "/refresh")
+    mock.return_value = ok({"results": [], "summary": {"requested": 1, "started": 0}})
+    client.refresh_cases_batch(["zzab-01-000001-2024", "junk"])
+    assert call(mock, 2)[1] == BASE + "/cases/refresh/batch"
+    assert call(mock, 2)[2]["json"] == {"cnrs": [CNR, "junk"]}
 
 
 # -- get_case_by_cnr -------------------------------------------------------
@@ -67,7 +108,7 @@ def test_normalize_cnr_rejects_garbage():
 def test_get_case_by_cnr_normalises_and_returns_found(make_client):
     client, mock = make_client()
     mock.return_value = ok({"cnr": CNR, "status": "found", "case": {"id": "c1"}, "requestId": None})
-    res = client.get_case_by_cnr("CNR: DLHC-01-008421-2021")
+    res = client.get_case_by_cnr("CNR: ZZAB-01-000001-2024")
     method, url, kwargs = call(mock)
     assert (method, url) == ("GET", BASE + "/cases/by-cnr/" + CNR)
     assert kwargs["params"] is None
@@ -103,7 +144,7 @@ def test_get_case_by_cnr_invalid_passed_through_for_server_to_reject(make_client
 def test_search_cases_cnr_without_query(make_client):
     client, mock = make_client()
     mock.return_value = FakeResponse(200, {"success": True, "data": [], "meta": {}, "pagination": {"hasMore": False}})
-    client.search_cases(cnr="cnr: dlhc010084212021")
+    client.search_cases(cnr="cnr: zzab010000012024")
     assert call(mock)[2]["json"] == {"cnr": CNR}
 
 
@@ -113,7 +154,7 @@ def test_search_cases_cnr_without_query(make_client):
 def test_create_watchlist_normalises_items(make_client):
     client, mock = make_client()
     mock.return_value = ok({"id": "wl_1", "results": [{"cnr": CNR, "result": "watching"}]})
-    res = client.create_watchlist("Loans", items=[{"cnr": "dlhc-010084-212021", "reference": "LOAN-42"}], metadata={"a": 1})
+    res = client.create_watchlist("Loans", items=[{"cnr": "zzab-010000-012024", "reference": "LOAN-42"}], metadata={"a": 1})
     method, url, kwargs = call(mock)
     assert (method, url) == ("POST", BASE + "/watchlists")
     assert kwargs["json"] == {"name": "Loans", "items": [{"cnr": CNR, "reference": "LOAN-42"}], "metadata": {"a": 1}}
@@ -175,14 +216,14 @@ def test_add_and_list_and_remove_items(make_client):
         page([{"cnr": "X"}], None),
         ok({"deleted": True}),
     ]
-    added = client.add_watchlist_items("wl_1", [{"cnr": "DLHC010084212021"}, {"cnr": "BAD"}])
+    added = client.add_watchlist_items("wl_1", [{"cnr": "ZZAB010000012024"}, {"cnr": "BAD"}])
     assert call(mock, 0)[2]["json"] == {"items": [{"cnr": CNR}, {"cnr": "BAD"}]}
     assert added.data["results"][1]["result"] == "invalid"
     cnrs = [i["cnr"] for i in client.iter_watchlist_items("wl_1", status="pending", limit=50)]
     assert cnrs == [CNR, "X"]
     assert call(mock, 1)[2]["params"] == {"limit": 50, "status": "pending"}
     assert call(mock, 2)[2]["params"]["cursor"] == "n1"
-    client.remove_watchlist_item("wl_1", "cnr dlhc010084212021")
+    client.remove_watchlist_item("wl_1", "cnr zzab010000012024")
     assert call(mock, 3)[:2] == ("DELETE", BASE + "/watchlists/wl_1/items/" + CNR)
 
 
@@ -197,7 +238,7 @@ def test_list_changes_params(make_client):
     client, mock = make_client()
     mock.return_value = page([evt("1")], "cur1")
     res = client.list_changes(
-        since="2026-11-01T00:00:00Z", types=["case.order_added", "case.disposed"], cnr="dlhc010084212021", limit=100
+        since="2026-11-01T00:00:00Z", types=["case.order_added", "case.disposed"], cnr="zzab010000012024", limit=100
     )
     assert call(mock)[:2] == ("GET", BASE + "/changes")
     assert call(mock)[2]["params"] == {
@@ -319,11 +360,11 @@ def test_delete_retried_by_default_but_patch_is_not(make_client, sleep_calls):
     assert mock2.call_count == 1
 
 
-def test_user_agent_is_0_5_0(make_client):
+def test_user_agent_is_0_6_0(make_client):
     client, mock = make_client()
     mock.return_value = ok({"id": "wh_1"})
     client.get_webhook("wh_1")
-    assert call(mock)[2]["headers"]["User-Agent"] == "courtmesh-python/0.5.0"
+    assert call(mock)[2]["headers"]["User-Agent"] == "courtmesh-python/0.6.0"
 
 
 # -- verify_webhook_signature --------------------------------------------------
@@ -431,12 +472,12 @@ def test_cap_exceeded_and_cooldown_not_found_are_data(make_client):
         {
             "results": [
                 {"cnr": CNR, "result": "cap_exceeded", "message": "The daily limit for adding case numbers has been reached. It resets at midnight IST."},
-                {"cnr": "DLHC010084212022", "result": "not_found", "message": "eCourts had no such case when we last looked. Try again tomorrow."},
+                {"cnr": "ZZAB010000022024", "result": "not_found", "message": "eCourts had no such case when we last looked. Try again tomorrow."},
             ],
             "itemCount": 3,
         }
     )
-    res = client.add_watchlist_items("wl_1", [{"cnr": CNR}, {"cnr": "DLHC010084212022"}])
+    res = client.add_watchlist_items("wl_1", [{"cnr": CNR}, {"cnr": "ZZAB010000022024"}])
     assert [r["result"] for r in res.data["results"]] == ["cap_exceeded", "not_found"]
 
 

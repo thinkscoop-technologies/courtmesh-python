@@ -3,9 +3,41 @@
 All notable changes to `courtmesh` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-Each entry also states which server flags/behaviour the version targets on
-the CourtMesh research server, since some of this SDK's contract only takes
-effect once a given server flag is on for your account.
+Each entry also states which CourtMesh API behaviour the version targets,
+since some of this SDK's contract depends on your account's plan.
+
+## [0.6.0]
+
+Adds the Acts and sections API. These calls need the `legislation` scope and cost 1 credit when something is returned, nothing when nothing is. Adds case depth and refresh by CNR. Adds the cause list calls. They need the `causelist` scope and an account with cause lists enabled. Adds party profiles and deleting a key's own audit activity. Targets API docs 1.8.0.
+
+### Added
+
+- `search_acts`, `resolve_act`, `get_act`, `get_act_history`, `list_act_sections`, `get_act_section`, `list_section_citing_cases`, `search_sections` and `lookup_section`.
+- `iter_section_citing_cases`, a generator that walks the citing judgments cursor by cursor.
+- Typed models for all of the above, exported from the package root (`Act`, `ActSection`, `ActHistory`, `SectionRow`, `CitingCases` and others), plus `ActsPageResult` and `CitingCasesResult`.
+- Error codes `ACT_NOT_FOUND` and `SECTION_NOT_FOUND` (both `NotFoundError`, not charged) and `UPSTREAM_UNAVAILABLE` (`BadGatewayError`, not charged, safe to retry), in `API_REFUSAL_CODES`.
+- `include` on `get_case` and `get_case_by_cnr`: hearing history and advocates, at no extra charge. Either can be null when no such record is held.
+- `list_case_orders` (1 credit): the documents of a case with availability flags. `get_case_document_text`: the stored text of one, 2 credits and charged only when text is returned.
+- `refresh_case_by_cnr`, `get_case_refresh_state` and `refresh_cases_batch`: refresh by CNR, one at a time or up to 50, with a free status read.
+- `ORDER_TEXT_LIMIT_REACHED` error code.
+- `list_cause_listings` and `iter_cause_listings` for `GET /cause-lists/listings`, `list_matter_cause_listings` for `GET /matters/{matterId}/cause-listings`, `get_court_cause_list` for `GET /cause-lists/court`, and `check_cause_lists` for `POST /cause-lists/check` (1 to 100 watched CNRs, at most 7 days).
+- Statuses `listed`, `no_entry_found`, `list_not_read`, `cannot_check` and `not_watched`. `listed` and `no_entry_found` cost 1 credit per CNR, the others are free. `no_entry_found` does not show a case is not listed.
+- Types for listings, court lists, rows, pagination and the check result (including `data["from"]` and `data["to"]`, the dates looked at, and the `reason` values of `cannot_check`; a check is limited to 100 CNRs and to CNRs times dates of at most 300, validated before a request is sent; a 503 `SETTLEMENT_UNCONFIRMED`, where the charge outcome is unknown, is never retried automatically, even with `retry_posts`), and the `CauseListPage` result with `has_more`.
+- `matter_id` (24 hex characters), `court_key`, dates and the CNR count are checked before a request is sent and raise `ValidationError`.
+- A `502` with `UPSTREAM_UNAVAILABLE` raises the existing `BadGatewayError`; it is not charged and GET calls are retried as before. `CAUSE_LISTS_NOT_ENABLED` (403) raises `PermissionDeniedError`.
+- `build_party_profile` for `POST /party/profile`: the cases of a person or company grouped into identities, quick mode (one answer) or full mode (202, then court refresh and analysis behind it). Accepts `idempotency_key`. Metered: at least 100 credits, at most 304 in quick mode; full mode is charged by usage up to `maxCredits`. Not available on the Free tier.
+- `get_party_profile` for `GET /party/profile/{requestId}`: status, progress, credits and, once completed, the result of a full mode request. Free.
+- `delete_audit_activity(before)` for `DELETE /audit`: permanently deletes the calling key's own activity before a UTC time. Cannot be undone. Never retried automatically after a network error or a 502, 503 or 504; a naive `datetime` raises `ValueError`.
+- Typed models for the above (`PartyProfileResult`, `PartyProfileAccepted`, `PartyProfileRequestStatus`, `PartyProfileCase`, `AuditDeleteResult` and others), exported from the package root.
+- Error codes `PARTY_PROFILE_FULL_UNAVAILABLE` (503, never retried) and `PARTY_PROFILE_TOO_MANY_ACTIVE` (429, not retried automatically) in `API_REFUSAL_CODES`. On `build_party_profile`, a 503 is retried (with `retry_posts`) only for `ACCOUNT_STANDING_UNAVAILABLE` and `ENTITLEMENT_UNAVAILABLE`.
+- New optional response fields: `bench`, `courtRecordActs` and `courtRecordFir` on `CaseDetails` (so also on `get_case_by_cnr`); `courtRecordActs`, `courtRecordFir` and `sameMatter` on `PartyScreenMatch`; `sameMatter` on search and semantic search hits; `SearchCasesResult.cnr_lookup` (the response's `cnrLookup`) on a `cnr` search that returned no case; `withheld` on change feed and watchlist events; `unavailableReason` on order rows, and `ordersTextWithheld` and `withheldReason` on `list_case_orders`.
+- `CnrLookup.case` is typed as `CaseDetails`.
+
+### Notes
+
+- Some matters are never listed on the citing list, and a page can hold fewer rows than `limit`, or none, while `hasMore` is true. Keep following `nextCursor`. Search, resolve, lookup and citing list calls have a lower per minute limit and return 429 above it.
+- The citing list is not exhaustive, and an empty list does not mean no judgment applied the provision. Check repeal status before relying on an act or provision.
+- `get_act_history` is act level and does not map old sections to new ones.
 
 ## [0.5.0]
 
@@ -39,7 +71,7 @@ Adds CNR lookup and case monitoring (API docs 1.3.0).
 
 ## [0.4.1]
 
-Live QA pass against the redeployed production research server
+Live QA pass against the redeployed production API
 (`research.courtmesh.ai`, 2026-09-19) and its updated OpenAPI spec. All items
 below were confirmed with live calls against an Enterprise key, not only
 against the spec.
@@ -48,9 +80,8 @@ against the spec.
 
 - `User-Agent: courtmesh-python/0.4.1` sent on every request.
 - `UsageTierLimits["published"]`: this tier's number in the OpenAPI
-  rate-limit table, distinct from `requestsPerMinute` (the number actually
-  enforced right now) until the API self-serve tiers flag is on for your
-  account, at which point the two converge.
+  rate-limit table, distinct from `requestsPerMinute` (the limit applied to this
+  key).
 - `CoverageMeta["snapshotAgeSeconds"]`, `["cacheAgeSeconds"]` and
   `["stale"]`, replacing a single `ageSeconds` field that never actually
   existed on the wire.
@@ -62,19 +93,18 @@ against the spec.
 
 ### Changed
 
-- **Breaking:** `AuditHit["userAgent"]` removed - the redeployed server no
+- **Breaking:** `AuditHit["userAgent"]` removed; the redeployed server no
   longer sends it at all (dropped for privacy alongside raw `ipAddress`,
   which never appeared on the wire in the first place). `AuditHit["ipHash"]`
   (a SHA-256 digest of the caller's IP) is retained; a same-day interim fix
   had renamed `ipAddress` to `ipHash`, which remains correct.
 - **Breaking:** `UsageTierLimits`: every field but `requestsPerMinute` (and
-  now `published`) is `Optional`, matching a live Enterprise-key response
-  with the self-serve tiers flag off. `limits` itself is confirmed always a
+  now `published`) is `Optional`, matching the live response. `limits` itself is confirmed always a
   populated dict, never `None`.
 - **Breaking:** `CoverageCourt`/`CoverageByCourtType`/`CoverageDistrictCourts`
   date and `businessDaysBehind` fields are now `Optional`, matching the live
   schema.
-- `AuditHit["metadata"]` is now `Optional[Dict[str, Any]]` - observed `None`
+- `AuditHit["metadata"]` is now `Optional[Dict[str, Any]]`; observed `None`
   in production for hits with nothing to log, not only omitted.
 - `HealthResponse["checks"]` entries are bare status strings in production
   (`"ok" | "fail" | "skipped"`), not `{"status", "latencyMs"?, "error"?}`
@@ -97,7 +127,7 @@ against the spec.
 
 ## [0.4.0]
 
-Targets the research server's account-introspection endpoints
+Targets the API's account-introspection endpoints
 (`GET /usage`, `GET /me`, `GET /audit`), the public reference endpoints
 (`GET /reference/courts`, `GET /reference/case-types`), the new
 `POST /party/screen/batch` endpoint, and the `Idempotency-Key` contract
@@ -106,7 +136,7 @@ being rolled out across the five job/charge-triggering POST endpoints.
 ### Added
 
 - `get_usage()`: `GET /usage`, this key's tier, wallet balance,
-  `TIER_LIMITS` for that tier, the current Asia/Kolkata billing period and a
+  the per tier limits, the current Asia/Kolkata billing period and a
   per endpoint call breakdown. Unmetered.
 - `me()`: `GET /me`, the calling account's id, email, name, role and (if
   any) organization id.
@@ -125,7 +155,7 @@ being rolled out across the five job/charge-triggering POST endpoints.
   failing the whole batch. Not available on the Free tier. LLM adjudication
   is not supported in the batch endpoint.
 - `health()` now takes a `deep` argument, `health(deep=True)` calls
-  `GET /health?deep=1`: also checks Mongo, OpenSearch, Qdrant, Redis and IAM
+  `GET /health?deep=1`: also checks each backing dependency's
   standing, and reports `status in ("degraded", "unhealthy")` plus a
   `checks` dict per dependency. `HealthResponse` gained `commit` and
   `checks`.
@@ -161,18 +191,12 @@ being rolled out across the five job/charge-triggering POST endpoints.
 
 ## [0.3.0]
 
-Targets the research server after the 2026-09-18 API abuse-control and
-parity pass (`server/config/api-tiers.ts`, `server/routes/api-v1-prod.ts`,
-`server/middleware/api-tier-limits.ts`, `server/utils/rate-limiter.ts`).
-Correct against that server regardless of whether `API_SELF_SERVE_TIERS` is
-on for your account, though several fields (`cursor`, tier refusal codes,
-per tier pagination caps) are only ever populated once it is.
+Targets the API as of 2026-09-18.
 
 ### Added
 
 - `cursor` request field on `search_cases`, and `pagination["nextCursor"]`
-  can now be a signed opaque string (when the API self-serve tiers flag is
-  on for your account) as well as the legacy raw list. `searchAfter` is
+  can now be a signed opaque string as well as the legacy raw list. `searchAfter` is
   documented as deprecated/legacy.
 - `iter_search_cases` is now cursor-first: it passes
   `pagination["nextCursor"]` back as `cursor` (or, on the legacy list
@@ -210,13 +234,13 @@ per tier pagination caps) are only ever populated once it is.
 - **Breaking:** `CaseListItem` now exposes `id`/`score`/`highlights` as the
   primary fields; `_id`/`_score` are kept but documented as legacy.
 - **Breaking:** `PartyScreenCoverage` no longer has `candidatesEvaluated` or
-  `adjudicationsRun` - `adjudicationsRun` moved to a top level field of
+  `adjudicationsRun`; `adjudicationsRun` moved to a top level field of
   `PartyScreenResult` (matching the server's actual response shape).
 - **Breaking:** `semantic_search`'s `caseNumber` argument is now a single
   digits-only string (was a string-or-list, validated but silently ignored
   by the handler for any value that was not already digits-only); `judges`/
   `judge` are now aliases collapsed into the single `judgeName` field sent
-  on the wire, matching what the vector store actually matches against
+  on the wire, matching what AI search actually matches against
   (one judge name).
 - Only `RATE_LIMITED` and `CONCURRENT_ANALYSIS_LIMIT` are retried
   automatically on a 429; a daily/monthly cap code never is.

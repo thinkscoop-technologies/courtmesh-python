@@ -33,8 +33,8 @@ Releases are published by GitHub Actions when a `v*` tag is pushed, using PyPI T
 
    ```bash
    git checkout main && git pull
-   git tag v0.5.0
-   git push origin v0.5.0
+   git tag v0.6.0
+   git push origin v0.6.0
    ```
 
 5. Watch the Publish workflow (approve the `pypi` environment if you required review). When it is green, confirm with `pip index versions courtmesh`.

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, FrozenSet, Optional
 
 import requests
 
@@ -120,6 +120,8 @@ class HTTPTransport:
         timeout: Optional[float] = None,
         retry_posts: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
+        retry_after_dispatch: Optional[bool] = None,
+        retryable_503_codes: Optional[FrozenSet[str]] = None,
     ) -> requests.Response:
         """Issue one request, retrying per the rules documented on
         `CourtMesh.__init__`.
@@ -131,6 +133,15 @@ class HTTPTransport:
             retry_posts: overrides `self.retry_posts` for this one call.
             idempotency_key: sent as the `Idempotency-Key` header when
                 given. Stable across every retry attempt of this same call.
+            retry_after_dispatch: when False, never retry once the request
+                may have reached the server (a connection/timeout error, or
+                a 502/503/504 response), whatever the method or
+                `retry_posts`. Used by calls whose effect cannot be undone.
+                A 429 is still retried under the usual rules, since it is a
+                refusal before any work. `None` keeps the default rule.
+            retryable_503_codes: when given, a 503 is retried (under the
+                rules above) only when its `code` is in this set. Used where
+                some 503s of an endpoint leave the charge outcome unknown.
         """
         url = "{}{}".format(self.base_url, path)
         headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
@@ -147,6 +158,8 @@ class HTTPTransport:
         # below, it is a pre-flight refusal, not evidence the request was
         # ever processed.
         can_retry_after_dispatch = method.upper() in ("GET", "DELETE") or effective_retry_posts
+        if retry_after_dispatch is False:
+            can_retry_after_dispatch = False
 
         attempt = 0
         while True:
@@ -199,12 +212,41 @@ class HTTPTransport:
                 response.status_code in _RETRYABLE_5XX_STATUS_CODES
                 and attempt < self.max_retries
                 and can_retry_after_dispatch
+                and not self._is_settlement_unconfirmed(response)
+                and self._is_retryable_503_for_call(response, retryable_503_codes)
             ):
                 attempt += 1
                 time.sleep(self._backoff_seconds(attempt))
                 continue
 
             return response
+
+    @staticmethod
+    def _is_settlement_unconfirmed(response: requests.Response) -> bool:
+        """A 503 `SETTLEMENT_UNCONFIRMED` means the charge outcome is unknown, so it is
+        never retried, whatever `retry_posts` says: a retry could charge again."""
+        if response.status_code != 503:
+            return False
+        try:
+            body = response.json()
+        except ValueError:
+            return False
+        return isinstance(body, dict) and body.get("code") == "SETTLEMENT_UNCONFIRMED"
+
+    @staticmethod
+    def _is_retryable_503_for_call(
+        response: requests.Response, retryable_503_codes: Optional[FrozenSet[str]]
+    ) -> bool:
+        """With `retryable_503_codes` given, a 503 is retried only when its
+        `code` is in that set; any other 503 (no code, or a code the call does
+        not know to be safe) is raised at once. Other statuses are unaffected."""
+        if retryable_503_codes is None or response.status_code != 503:
+            return True
+        try:
+            body = response.json()
+        except ValueError:
+            return False
+        return isinstance(body, dict) and body.get("code") in retryable_503_codes
 
     def parse_envelope(self, response: requests.Response) -> Any:
         """Parse the JSON body and raise on HTTP error status codes.
@@ -237,7 +279,7 @@ class HTTPTransport:
                 header_request_id = response.headers.get("X-Request-Id")
                 if header_request_id:
                     body["requestId"] = header_request_id
-            # Only the five idempotency-key-aware POST methods ever receive
+            # Only the idempotency-key-aware POST methods ever receive
             # this header, so this is a no-op on every other endpoint.
             replayed_header = response.headers.get("Idempotency-Replayed")
             if replayed_header and replayed_header.lower() == "true":

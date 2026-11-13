@@ -15,12 +15,12 @@ except ImportError:  # pragma: no cover - Python 3.7/3.8 fallback, unused at run
 
 
 # ---------------------------------------------------------------------------
-# Machine readable refusal codes, mirroring the research server's
-# API_REFUSAL_CODES (server/config/api-tiers.ts), plus the handler-local
+# Machine readable refusal codes, mirroring the API's machine
+# refusal codes, plus the handler-local
 # codes used outside that table (CASE_RESTRICTED, PDF_NOT_STORED,
 # CASE_NOT_FOUND, PARTY_SCREEN_SEARCH_DEGRADED, CURSOR_INVALID,
 # PAGE_LIMIT_EXCEEDED, PAGINATION_DEPTH_EXCEEDED, the API_KEY_* auth codes,
-# and the JSON/body-parser codes this SDK synthesises client side since the
+# and the malformed body codes this SDK synthesises client side since the
 # server itself attaches no `code` field to those).
 # ---------------------------------------------------------------------------
 
@@ -40,6 +40,7 @@ if Literal is not None:
         "LIVE_FETCH_LIMIT_REACHED",
         "DISTINCT_CASES_LIMIT_REACHED",
         "PDF_LIMIT_REACHED",
+        "ORDER_TEXT_LIMIT_REACHED",
         "TOO_MANY_KEYS_FROM_IP",
         "EMAIL_NOT_VERIFIED",
         "CONCURRENT_ANALYSIS_LIMIT",
@@ -68,6 +69,11 @@ if Literal is not None:
         "IDEMPOTENCY_KEY_REUSED",
         "IDEMPOTENCY_IN_PROGRESS",
         "IDEMPOTENCY_KEY_INVALID",
+        "ACT_NOT_FOUND",
+        "SECTION_NOT_FOUND",
+        "UPSTREAM_UNAVAILABLE",
+        "PARTY_PROFILE_FULL_UNAVAILABLE",
+        "PARTY_PROFILE_TOO_MANY_ACTIVE",
     ]
 else:  # pragma: no cover
     ApiRefusalCode = str  # type: ignore[assignment,misc]
@@ -90,6 +96,7 @@ API_REFUSAL_CODES: Tuple[str, ...] = (
     "LIVE_FETCH_LIMIT_REACHED",
     "DISTINCT_CASES_LIMIT_REACHED",
     "PDF_LIMIT_REACHED",
+    "ORDER_TEXT_LIMIT_REACHED",
     "TOO_MANY_KEYS_FROM_IP",
     "EMAIL_NOT_VERIFIED",
     "CONCURRENT_ANALYSIS_LIMIT",
@@ -118,6 +125,11 @@ API_REFUSAL_CODES: Tuple[str, ...] = (
     "IDEMPOTENCY_KEY_REUSED",
     "IDEMPOTENCY_IN_PROGRESS",
     "IDEMPOTENCY_KEY_INVALID",
+    "ACT_NOT_FOUND",
+    "SECTION_NOT_FOUND",
+    "UPSTREAM_UNAVAILABLE",
+    "PARTY_PROFILE_FULL_UNAVAILABLE",
+    "PARTY_PROFILE_TOO_MANY_ACTIVE",
 )
 
 #: 429 codes safe to retry automatically. Never a daily/monthly cap code.
@@ -131,6 +143,7 @@ _DAILY_CAP_429_CODES = frozenset(
         "LIVE_FETCH_LIMIT_REACHED",
         "DISTINCT_CASES_LIMIT_REACHED",
         "PDF_LIMIT_REACHED",
+        "ORDER_TEXT_LIMIT_REACHED",
         "TOO_MANY_KEYS_FROM_IP",
     }
 )
@@ -162,8 +175,7 @@ class CourtMeshError(Exception):
         code: the server's machine readable `code` field verbatim (see
             `ApiRefusalCode`/`API_REFUSAL_CODES`), when the server sent one.
             None on older server responses that carry no `code`.
-        request_id: echoed from the response body's `requestId` field (sent
-            once the API's request-id middleware ships) or, failing that,
+        request_id: echoed from the response body's `requestId` field or, failing that,
             the `X-Request-Id` response header, when either is present.
     """
 
@@ -321,14 +333,14 @@ class ConflictError(CourtMeshError):
     different request body than the one it was first used with, or
     `code == "IDEMPOTENCY_IN_PROGRESS"` when a request with this same key
     is still being processed concurrently (retry shortly). Only ever raised
-    by `screen_party`, `screen_party_batch`, `analyze_case`,
-    `analyze_consolidated` and `request_timeline`, the five methods that
-    accept an `idempotency_key`.
+    by the methods that accept an `idempotency_key`, for example
+    `screen_party`, `screen_party_batch`, `build_party_profile`,
+    `analyze_case`, `analyze_consolidated` and `request_timeline`.
     """
 
 
 class RequestTimeoutError(CourtMeshError):
-    """HTTP 408. The upstream OpenSearch query took too long, or the SDK's
+    """HTTP 408. The search took too long, or the SDK's
     own client side timeout fired."""
 
 
@@ -337,7 +349,9 @@ class RateLimitError(CourtMeshError):
     concurrency cap (`"CONCURRENT_ANALYSIS_LIMIT"`), or a daily/monthly cap
     (`"DISTINCT_NAMES_LIMIT_REACHED"`, `"LIVE_FETCH_LIMIT_REACHED"`,
     `"DISTINCT_CASES_LIMIT_REACHED"`, `"PDF_LIMIT_REACHED"`,
-    `"TOO_MANY_KEYS_FROM_IP"`). Only the first two are ever retried
+    `"TOO_MANY_KEYS_FROM_IP"`), or `"PARTY_PROFILE_TOO_MANY_ACTIVE"` (the
+    account already has 3 full mode party profiles queued or running). Only
+    `RATE_LIMITED` and `CONCURRENT_ANALYSIS_LIMIT` are ever retried
     automatically, see `is_retryable_429_code`.
 
     Attributes:
@@ -381,9 +395,20 @@ class BadGatewayError(CourtMeshError):
 
 
 class ServiceUnavailableError(CourtMeshError):
-    """HTTP 503. Account standing could not be verified
-    (`code == "ENTITLEMENT_UNAVAILABLE"`), or the service is otherwise
-    unavailable. Safe to retry.
+    """HTTP 503.
+
+    - `code == "ENTITLEMENT_UNAVAILABLE"`: account standing could not be
+      verified, nothing ran, safe to retry.
+    - `code == "SETTLEMENT_UNCONFIRMED"` (the cause list check): the answer was
+      ready but the charge could not be confirmed and no results were returned.
+      The charge outcome is unknown, so this is never retried automatically:
+      check your balance (`get_usage()`) first. A retry with the same
+      idempotency key is refused with 409 `IDEMPOTENCY_IN_PROGRESS` for up to
+      24 hours.
+    - `code == "PARTY_PROFILE_FULL_UNAVAILABLE"` (`build_party_profile`):
+      full mode is not available, nothing was charged. Send `mode="quick"`.
+      Never retried automatically.
+    - Any other 503 is the service being unavailable.
     """
 
 

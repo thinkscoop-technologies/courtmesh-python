@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 # A canonical CNR is 16 characters: a 6 character establishment code that
 # begins with a 2 letter state code (almost always 4 letters then 2 digits,
-# for example "DLHC01"), 6 serial digits and a 4 digit year.
+# for example "ZZAB01"), 6 serial digits and a 4 digit year.
 _CNR_PATTERN = re.compile(r"^[A-Z]{2}[A-Z0-9]{4}[0-9]{10}$")
 _CNR_SEPARATORS = re.compile(r"[\s\-/.:]+")
 
@@ -29,8 +29,8 @@ def normalize_cnr(value: Any) -> Optional[str]:
     The server is the authority; this lets you validate input before
     spending a request.
 
-    >>> normalize_cnr("CNR: DLHC-01-008421-2021")
-    'DLHC010084212021'
+    >>> normalize_cnr("CNR: ZZAB-01-000001-2024")
+    'ZZAB010000012024'
     """
     if not isinstance(value, str):
         return None
@@ -49,7 +49,7 @@ def assert_cnr(value: Any) -> str:
     """Like `normalize_cnr` but raises `ValueError` for input that cannot be a CNR."""
     cnr = normalize_cnr(value)
     if cnr is None:
-        raise ValueError("Not a valid CNR: expected 16 characters, for example DLHC010084212021.")
+        raise ValueError("Not a valid CNR: expected 16 characters, for example ZZAB010000012024.")
     return cnr
 
 

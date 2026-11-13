@@ -606,7 +606,7 @@ def test_screen_party_replayed_response_redacts_query_name_and_aliases(make_clie
     )
     mock_request.return_value = FakeResponse(200, body, headers={"Idempotency-Replayed": "true"})
 
-    result = client.screen_party(name="Poojitha", entityType="person", purpose="research", idempotency_key="same-key")
+    result = client.screen_party(name="Testname", entityType="person", purpose="research", idempotency_key="same-key")
 
     assert result.replayed is True
     name = result.data["query"]["name"]
@@ -621,24 +621,21 @@ def test_get_coverage_unwraps_snapshot_and_sends_api_key(make_client, envelope):
     body = envelope(
         data={
             "generatedAt": "2026-09-18T00:00:00.000Z",
-            "index": "courtmesh_cases_v3",
-            "total": 315_600_000,
-            "documentBearing": 12_000_000,
-            "statusOnly": 303_600_000,
-            "byCourtType": [{"courtType": "High Court", "records": 40_000_000, "documentBearing": 8_000_000, "latestDecisionDate": "2026-09-17"}],
-            "byYear": [{"year": 2026, "records": 1_200_000}],
+            "index": "corpus-0123456789ab",
+            "total": 1_000,
+            "byCourtType": [{"courtType": "High Court", "records": 400, "latestDecisionDate": "2026-09-17"}],
+            "byYear": [{"year": 2026, "records": 120}],
             "courts": [
                 {
                     "court": "Delhi High Court",
                     "courtType": "High Court",
-                    "records": 2_000_000,
-                    "documentBearing": 500_000,
+                    "records": 200,
                     "earliestDecisionDate": "1950-01-01",
                     "latestDecisionDate": "2026-09-17",
                     "businessDaysBehind": 1,
                 }
             ],
-            "districtCourts": {"records": 300_000_000, "documentBearing": 1_000_000, "latestDecisionDate": "2026-09-16", "businessDaysBehind": 2},
+            "districtCourts": {"records": 500, "latestDecisionDate": "2026-09-16", "businessDaysBehind": 2},
         },
         meta={
             "generatedAt": "2026-09-18T00:00:00.000Z",
@@ -653,8 +650,8 @@ def test_get_coverage_unwraps_snapshot_and_sends_api_key(make_client, envelope):
 
     result = client.get_coverage()
 
-    assert result.data["total"] == 315_600_000
-    assert result.data["districtCourts"]["records"] == 300_000_000
+    assert result.data["total"] == 1_000
+    assert result.data["districtCourts"]["records"] == 500
     assert result.meta["cacheTtlSeconds"] == 21600
     assert result.meta["snapshotAgeSeconds"] == 2145
     assert result.meta["cacheAgeSeconds"] == 712
@@ -702,19 +699,17 @@ def test_get_usage_unwraps_tier_balance_and_by_endpoint(make_client, envelope):
 
 
 def test_get_usage_live_shape_null_limits_and_self_serve_meta(make_client, envelope):
-    """Live-verified 2026-09-19 against the redeployed server: `limits` is
-    always a populated object (never None itself). An Enterprise key's
-    limits came back None (not -1, not True/False) for every field but
-    requestsPerMinute and the new `published`, and meta carried an
-    undocumented selfServe flag."""
+    """`limits` is always a populated object (never None itself). Every field
+    but requestsPerMinute and `published` can come back None (not -1, not
+    True/False), and meta can carry selfServe."""
     client, mock_request = make_client()
     body = envelope(
         data={
-            "tier": "enterprise",
+            "tier": "payg",
             "walletOwner": {"type": "user", "id": "u1"},
             "balance": {"total": 0, "monthlyGrant": 0, "signupGrant": 0, "purchased": 0},
             "limits": {
-                "requestsPerMinute": 10,
+                "requestsPerMinute": 30,
                 "requestsPerDay": None,
                 "requestsPerMonth": None,
                 "maxPageSize": None,
@@ -729,24 +724,24 @@ def test_get_usage_live_shape_null_limits_and_self_serve_meta(make_client, envel
                 "liveFetchesPerDay": None,
                 "analysisReadAllowed": None,
                 "partyScreensPerMonth": None,
-                "published": 600,
+                "published": 60,
             },
             "period": {"start": "2026-08-31T18:30:00.000Z", "end": "2026-09-30T18:29:59.999Z", "key": "2026-09"},
             "creditsUsedThisPeriod": 0,
             "byEndpoint": [],
             "subscriptionRenewsAt": None,
         },
-        meta={"requestId": "req-usage-2", "selfServe": False},
+        meta={"requestId": "req-usage-2", "selfServe": True},
     )
     mock_request.return_value = FakeResponse(200, body)
 
     result = client.get_usage()
 
-    assert result.data["limits"]["requestsPerMinute"] == 10
+    assert result.data["limits"]["requestsPerMinute"] == 30
     assert result.data["limits"]["requestsPerDay"] is None
     assert result.data["limits"]["semanticSearchAllowed"] is None
-    assert result.data["limits"]["published"] == 600
-    assert result.meta["selfServe"] is False
+    assert result.data["limits"]["published"] == 60
+    assert result.meta["selfServe"] is True
 
 
 # -- 16. GET /health?deep=1 ----------------------------------------------------
@@ -759,7 +754,7 @@ def test_health_deep_sends_deep_query_param(make_client):
         "status": "degraded",
         "version": "1.0.0",
         "commit": "abc123",
-        "checks": {"mongo": {"status": "ok", "latencyMs": 12}, "opensearch": {"status": "degraded", "latencyMs": 900}},
+        "checks": {"database": {"status": "ok", "latencyMs": 12}, "search": {"status": "degraded", "latencyMs": 900}},
         "timestamp": "2026-09-18T00:00:00.000Z",
     }
     mock_request.return_value = FakeResponse(200, body)
@@ -767,29 +762,29 @@ def test_health_deep_sends_deep_query_param(make_client):
     result = client.health(deep=True)
 
     assert result["status"] == "degraded"
-    assert result["checks"]["opensearch"]["status"] == "degraded"
+    assert result["checks"]["search"]["status"] == "degraded"
     params = mock_request.call_args.kwargs["params"]
     assert params == {"deep": "1"}
 
 
 def test_health_deep_live_shape_checks_are_bare_status_strings(make_client):
-    """Live-verified 2026-09-19: the deployed server sends checks as
-    {"mongo": "ok", ...}, never the richer {"status", "latencyMs", "error"}
+    """Live-verified 2026-09-19: the deployed server sends check values as
+    bare status strings, never the richer {"status", "latencyMs", "error"}
     object this SDK originally (and still optionally) documents."""
     client, mock_request = make_client()
     body = {
         "success": True,
         "status": "healthy",
         "version": "1.2.0",
-        "checks": {"mongo": "ok", "opensearch": "ok", "qdrant": "ok", "redis": "ok", "iam": "ok"},
+        "checks": {"database": "ok", "search": "ok", "aiSearch": "ok", "cache": "ok", "identity": "ok"},
         "timestamp": "2026-09-18T20:14:22.870Z",
     }
     mock_request.return_value = FakeResponse(200, body)
 
     result = client.health(deep=True)
 
-    assert result["checks"]["mongo"] == "ok"
-    assert result["checks"]["opensearch"] == "ok"
+    assert result["checks"]["database"] == "ok"
+    assert result["checks"]["search"] == "ok"
 
 
 def test_health_plain_sends_no_query_param(make_client):
@@ -867,7 +862,7 @@ def test_audit_live_shape_hits_carry_ip_hash_never_ip_address_or_user_agent(make
                     "responseTime": 2,
                     "createdAt": "2026-09-18T00:00:00.000Z",
                     "metadata": None,
-                    "ipHash": "4173bdfd6267defad05aa48fdf5d69b0cb45293f2f7e5de9665b20a0df9f5e5f",
+                    "ipHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                 }
             ],
             "summary": {"totalHits": 1, "totalAiAnalysisHits": 0, "avgResponseTime": 2, "successfulHits": 1, "successRate": "100.0", "totalCreditsDeducted": 0},
@@ -879,7 +874,7 @@ def test_audit_live_shape_hits_carry_ip_hash_never_ip_address_or_user_agent(make
 
     result = client.audit()
 
-    assert result.data["hits"][0]["ipHash"] == "4173bdfd6267defad05aa48fdf5d69b0cb45293f2f7e5de9665b20a0df9f5e5f"
+    assert result.data["hits"][0]["ipHash"] == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     assert result.data["hits"][0]["metadata"] is None
     assert "userAgent" not in result.data["hits"][0]
 
