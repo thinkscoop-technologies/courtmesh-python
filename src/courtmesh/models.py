@@ -1558,78 +1558,56 @@ class MeData(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# 17. GET /audit
+# 17. GET /audit/records (access audit)
 # ---------------------------------------------------------------------------
 
 
-class AuditHit(TypedDict, total=False):
+class AuditRecord(TypedDict, total=False):
+    """One access audit record: who ran which call, when, with what input."""
+
     id: str
-    userId: str
-    organizationId: str
-    endpoint: str
-    method: str
-    statusCode: int
-    responseTime: float
-    isAiAnalysis: bool
-    creditsDeducted: int
-    #: Observed `None` in production for hits with nothing to log (for
-    #: example a plain `GET /me`), not only omitted.
-    metadata: Optional[Dict[str, Any]]
-    #: Live-verified 2026-09-19 against the redeployed server and its
-    #: updated OpenAPI spec: `ipHash` (a SHA-256 hex digest of the caller's
-    #: IP) is still sent, and remains the only IP-shaped field - raw
-    #: `ipAddress` does not exist on the wire. `userAgent`, however, is no
-    #: longer sent at all as of this deploy (dropped for privacy alongside
-    #: raw `ipAddress`, per the endpoint's updated description); this SDK's
-    #: field for it is removed.
-    ipHash: str
     createdAt: str
+    #: `api` for a call made with a key, `web` for a search on the website.
+    source: str
+    #: `Website`, or the API key name.
+    sourceLabel: str
+    #: Email of the user who ran it, or who owns the key.
+    person: Optional[str]
+    userId: Optional[str]
+    apiKeyId: Optional[str]
+    #: The key name as it was at the time.
+    apiKeyName: Optional[str]
+    #: The masked key, for example `cm-...A1b2`.
+    apiKeyDisplay: Optional[str]
+    feature: str
+    #: The screened name or search text, or for a read what was read.
+    inputLabel: Optional[str]
+    #: Verdict, counts and credits. Never a name.
+    summary: Dict[str, Any]
+    statusCode: int
+    requestId: str
+    clientRefs: List[str]
+    #: Set on an idempotent replay: the original call.
+    replayOf: Optional[Dict[str, Any]]
+    #: `mcp` when the calling client reported the CourtMesh MCP connector.
+    client: Optional[str]
 
 
-class AuditTopEndpoint(TypedDict, total=False):
-    endpoint: str
-    count: int
+class AuditRecordsData(TypedDict, total=False):
+    """`data` of `GET /audit/records`."""
 
-
-class AuditSummary(TypedDict, total=False):
-    totalHits: int
-    totalAiAnalysisHits: int
-    avgResponseTime: float
-    successfulHits: int
-    #: A string, e.g. `"98.5"` with one decimal place.
-    successRate: str
-    totalCreditsDeducted: int
-
-
-class AuditData(TypedDict, total=False):
-    hits: List[AuditHit]
-    summary: AuditSummary
-    topEndpoints: List[AuditTopEndpoint]
-
-
-class AuditPagination(TypedDict, total=False):
-    total: int
-    limit: int
-    offset: int
-    hasMore: bool
-
-
-@dataclass
-class AuditResult:
-    """Result of `audit`. `GET /audit` nests its own pagination shape under
-    the envelope, distinct from `SearchCasesPagination`/`SemanticSearchPagination`.
-    """
-
-    data: AuditData
-    pagination: AuditPagination
-    request_id: Optional[str] = None
+    items: List[AuditRecord]
+    #: Pass as `cursor` for the next page. `None` on the last page.
+    nextCursor: Optional[str]
+    #: False when access audit is not switched on for your organisation.
+    auditEnabled: bool
 
 
 class AuditDeleteResult(TypedDict, total=False):
     """`data` of `DELETE /audit`.
 
     `before` is the time used, in UTC. `removed` counts the calls removed
-    from `audit()` by this request. `complete` is False when part is left:
+    from the calling key's call history by this request. `complete` is False when part is left:
     send the same request again to finish.
     """
 

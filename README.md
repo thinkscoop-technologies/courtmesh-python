@@ -367,9 +367,34 @@ Pricing, full mode: charged by usage, one stage at a time: the search stage at t
 
 A document's `links["pdf"]` works for one hour without an API key. Receiving it is free; the first open is charged as one PDF call, later opens are free. Pass `webhook={"url": "https://..."}` with a full mode request to be told when it ends, and check deliveries with `verify_webhook_signature` using the `signingSecret` returned once in the 202 answer. A 503 whose charge outcome is unknown is never retried automatically: check `get_usage()` before sending the request again. Being a party to a case is not a finding against anyone.
 
+## Access audit
+
+For organisations with access audit switched on, `audit()` lists every call made with the organisation's keys and every search made on the website by its users, newest first, with who ran it, when and with what input. A key owned by an organisation admin sees every record of the organisation; any other key sees only its own. Free. Needs the `account` scope.
+
+```python
+page = cm.audit(name="Example Person", from_date="2026-11-01", to_date="2026-11-20", limit=50)
+for record in page.data["items"]:
+    print(record["createdAt"], record["feature"], record["inputLabel"], record["requestId"])
+# page.data["nextCursor"]: pass it as cursor= for the next page, None on the last one.
+
+for record in cm.iter_audit(source="api", order="oldest"):
+    ...
+```
+
+Filters: `name`, `from_date` and `to_date` (sent as `from` and `to`), `source` (`"api"` or `"web"`), `feature`, `apiKeyId`, `userId`, `requestId`, `clientRef`, `order` (`"newest"` or `"oldest"`), `cursor` and `limit` (1 to 100, default 50). A date with no time means that whole day in India time. For an organisation without access audit switched on, the list is empty and `data["auditEnabled"]` is False.
+
+`get_audit_record_pdf(request_id)` returns the record of one call as PDF bytes, using the `X-Request-Id` that call returned. The record is written just after the call returns, so a fetch in the same instant can raise `NotFoundError` (`AUDIT_NOT_FOUND`): wait a second and ask again. At most 30 PDFs a minute per key.
+
+```python
+with open("record.pdf", "wb") as f:
+    f.write(cm.get_audit_record_pdf(request_id))
+```
+
+Since 0.7.0 `audit()` calls `GET /audit/records`. The older `GET /audit` call history was retired on 21 Nov 2026 and answers 410 `ENDPOINT_MOVED`.
+
 ## Deleting audit activity
 
-`delete_audit_activity` permanently deletes this API key's own activity before a UTC time. **It cannot be undone.** Those calls are no longer listed by `audit()` and the request details kept with them are erased. Other keys on the account are not touched, and what you were charged stays on your invoices and usage totals. Needs the `account` scope; free.
+`delete_audit_activity` permanently deletes this API key's own call history before a UTC time. **It cannot be undone.** Those calls are removed and the request details kept with them are erased. Other keys on the account are not touched, and what you were charged stays on your invoices and usage totals. Needs the `account` scope; free.
 
 ```python
 from datetime import datetime, timezone
@@ -381,7 +406,7 @@ while not result.data["complete"]:
     result = cm.delete_audit_activity("2026-11-05T00:00:00Z")
 ```
 
-A naive `datetime` raises `ValueError` before anything is sent. This call is never retried automatically after a connection error, a timeout or a 502, 503 or 504, because the outcome is then unknown: check with `audit()`, then send it again if needed.
+A naive `datetime` raises `ValueError` before anything is sent. This call is never retried automatically after a connection error, a timeout or a 502, 503 or 504, because the outcome is then unknown; sending the same request again yourself is safe.
 
 ## Case depth and refresh by CNR
 

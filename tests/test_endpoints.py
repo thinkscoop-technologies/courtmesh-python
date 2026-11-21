@@ -1,4 +1,7 @@
 """One test per endpoint method, plus envelope unwrapping checks."""
+import pytest
+
+from courtmesh.errors import CourtMeshError, NotFoundError
 from helpers import FakeResponse
 
 
@@ -816,67 +819,187 @@ def test_me_unwraps_account_identity(make_client, envelope):
     assert headers.get("Authorization", "").startswith("Bearer ")
 
 
-# -- 18. GET /audit -------------------------------------------------------------
+# -- 18. GET /audit/records (access audit) --------------------------------------
+
+AUDIT_RECORD = {
+    "id": "673d9a1f2c4b5e6f7a8b9c0d",
+    "createdAt": "2026-11-20T09:15:02.000Z",
+    "source": "api",
+    "sourceLabel": "API key: Production",
+    "person": "ops@example.com",
+    "userId": "673d9a1f2c4b5e6f7a8b9c02",
+    "apiKeyId": "673d9a1f2c4b5e6f7a8b9c01",
+    "apiKeyName": "Production",
+    "apiKeyDisplay": "cm-...A1b2",
+    "feature": "Party screen",
+    "inputLabel": "Example Person",
+    "summary": {"verdict": "matches_found", "matchCount": 2, "creditsCharged": 5},
+    "statusCode": 200,
+    "requestId": "9b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e",
+    "clientRefs": ["candidate-3381"],
+    "replayOf": None,
+}
 
 
-def test_audit_sends_query_params_and_unwraps_hits(make_client):
+def _records_body(items, next_cursor=None, enabled=True, message=None):
+    meta = {"creditsCharged": 0}
+    if message:
+        meta["message"] = message
+    return {"success": True, "data": {"items": items, "nextCursor": next_cursor, "auditEnabled": enabled}, "meta": meta}
+
+
+def test_audit_calls_audit_records_never_the_retired_audit(make_client):
     client, mock_request = make_client()
-    body = {
-        "success": True,
-        "data": {
-            "hits": [{"id": "h1", "endpoint": "/api/v1/prod/search/cases", "method": "POST", "statusCode": 200, "responseTime": 120, "createdAt": "2026-09-18T00:00:00.000Z"}],
-            "summary": {"totalHits": 1, "totalAiAnalysisHits": 0, "avgResponseTime": 120, "successfulHits": 1, "successRate": "100.0", "totalCreditsDeducted": 1},
-            "topEndpoints": [{"endpoint": "/api/v1/prod/search/cases", "count": 1}],
-        },
-        "pagination": {"total": 1, "limit": 50, "offset": 0, "hasMore": False},
-    }
-    mock_request.return_value = FakeResponse(200, body)
-
-    result = client.audit(userId="u1", limit=50, offset=0)
-
-    assert len(result.data["hits"]) == 1
-    assert result.data["summary"]["successRate"] == "100.0"
-    assert result.pagination["total"] == 1
-    method, url = mock_request.call_args.args
-    assert url.endswith("/audit")
-    params = mock_request.call_args.kwargs["params"]
-    assert params == {"userId": "u1", "limit": 50, "offset": 0}
-
-
-def test_audit_live_shape_hits_carry_ip_hash_never_ip_address_or_user_agent(make_client):
-    """Live-verified 2026-09-19 against the redeployed server and its
-    updated OpenAPI spec: every hit's IP field on the wire is ipHash (a
-    SHA-256 hex digest), never raw ipAddress; userAgent is no longer sent at
-    all as of this deploy (dropped for privacy alongside ipAddress).
-    metadata can also be sent as an explicit None, not only omitted."""
-    client, mock_request = make_client()
-    body = {
-        "success": True,
-        "data": {
-            "hits": [
-                {
-                    "id": "h1",
-                    "endpoint": "/api/v1/prod/me",
-                    "method": "GET",
-                    "statusCode": 200,
-                    "responseTime": 2,
-                    "createdAt": "2026-09-18T00:00:00.000Z",
-                    "metadata": None,
-                    "ipHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                }
-            ],
-            "summary": {"totalHits": 1, "totalAiAnalysisHits": 0, "avgResponseTime": 2, "successfulHits": 1, "successRate": "100.0", "totalCreditsDeducted": 0},
-            "topEndpoints": [{"endpoint": "/api/v1/prod/me", "count": 1}],
-        },
-        "pagination": {"total": 1, "limit": 50, "offset": 0, "hasMore": False},
-    }
-    mock_request.return_value = FakeResponse(200, body)
+    mock_request.return_value = FakeResponse(200, _records_body([AUDIT_RECORD]))
 
     result = client.audit()
 
-    assert result.data["hits"][0]["ipHash"] == "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    assert result.data["hits"][0]["metadata"] is None
-    assert "userAgent" not in result.data["hits"][0]
+    method, url = mock_request.call_args.args
+    assert (method, url) == ("GET", "https://research.courtmesh.ai/api/v1/prod/audit/records")
+    assert mock_request.call_args.kwargs["params"] is None
+    assert result.data["items"][0]["requestId"] == AUDIT_RECORD["requestId"]
+    assert result.data["items"][0]["clientRefs"] == ["candidate-3381"]
+    assert result.data["nextCursor"] is None
+    assert result.data["auditEnabled"] is True
+    assert result.meta["creditsCharged"] == 0
+
+
+def test_audit_sends_every_filter(make_client):
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(200, _records_body([], next_cursor="c2"))
+
+    result = client.audit(
+        name="Example Person",
+        from_date="2026-11-01",
+        to_date="2026-11-20T23:59:59Z",
+        source="api",
+        feature="Party screen",
+        apiKeyId="673d9a1f2c4b5e6f7a8b9c01",
+        userId="673d9a1f2c4b5e6f7a8b9c02",
+        requestId="req-1",
+        clientRef="candidate-3381/row-33",
+        order="oldest",
+        cursor="c1",
+        limit=100,
+    )
+
+    assert mock_request.call_args.kwargs["params"] == {
+        "name": "Example Person",
+        "from": "2026-11-01",
+        "to": "2026-11-20T23:59:59Z",
+        "source": "api",
+        "feature": "Party screen",
+        "apiKeyId": "673d9a1f2c4b5e6f7a8b9c01",
+        "userId": "673d9a1f2c4b5e6f7a8b9c02",
+        "requestId": "req-1",
+        "clientRef": "candidate-3381/row-33",
+        "order": "oldest",
+        "cursor": "c1",
+        "limit": 100,
+    }
+    assert result.data["nextCursor"] == "c2"
+
+
+def test_audit_no_longer_accepts_the_old_filters(make_client):
+    client, _ = make_client()
+    for old in ({"organizationId": "o1"}, {"offset": 0}, {"startDate": "2026-01-01"}, {"endDate": "2026-01-01"}):
+        with pytest.raises(TypeError):
+            client.audit(**old)
+
+
+@pytest.mark.parametrize("limit", [0, 101, True, 1.5])
+def test_audit_rejects_a_limit_outside_1_to_100_before_sending(make_client, limit):
+    client, mock_request = make_client()
+    with pytest.raises(ValueError):
+        client.audit(limit=limit)
+    mock_request.assert_not_called()
+
+
+def test_audit_not_switched_on_returns_empty_list_and_message(make_client):
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(
+        200, _records_body([], enabled=False, message="Access audit is not switched on for your organisation. Contact us to switch it on.")
+    )
+    result = client.audit()
+    assert result.data["auditEnabled"] is False
+    assert "not switched on" in result.meta["message"]
+
+
+def test_iter_audit_follows_next_cursor_with_the_same_filters(make_client):
+    client, mock_request = make_client()
+    mock_request.side_effect = [
+        FakeResponse(200, _records_body([AUDIT_RECORD], next_cursor="c2")),
+        FakeResponse(200, _records_body([dict(AUDIT_RECORD, id="r2")])),
+    ]
+    ids = [r["id"] for r in client.iter_audit(order="oldest", limit=1)]
+    assert ids == [AUDIT_RECORD["id"], "r2"]
+    second = mock_request.call_args_list[1].kwargs["params"]
+    assert second == {"order": "oldest", "limit": 1, "cursor": "c2"}
+
+
+def test_audit_410_endpoint_moved_is_raised_with_its_code(make_client):
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(
+        410, {"success": False, "code": "ENDPOINT_MOVED", "message": "Moved.", "replacement": "/api/v1/prod/audit/records"}
+    )
+    with pytest.raises(CourtMeshError) as exc_info:
+        client.audit()
+    assert exc_info.value.status_code == 410
+    assert exc_info.value.code == "ENDPOINT_MOVED"
+
+
+# -- GET /audit/{requestId}/pdf ---------------------------------------------------
+
+PDF_BYTES = b"%PDF-1.7\n"
+
+
+def test_get_audit_record_pdf_returns_bytes_and_asks_for_pdf(make_client):
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(200, headers={"Content-Type": "application/pdf"}, content=PDF_BYTES)
+
+    pdf = client.get_audit_record_pdf("9b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e")
+
+    assert pdf == PDF_BYTES
+    method, url = mock_request.call_args.args
+    assert (method, url) == ("GET", "https://research.courtmesh.ai/api/v1/prod/audit/9b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e/pdf")
+    assert mock_request.call_args.kwargs["headers"]["Accept"].startswith("application/pdf")
+
+
+def test_get_audit_record_pdf_404_is_not_found(make_client):
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(
+        404,
+        {"success": False, "code": "AUDIT_NOT_FOUND", "message": "No audit entry for this request id was found."},
+        headers={"Content-Type": "application/json"},
+    )
+    with pytest.raises(NotFoundError) as exc_info:
+        client.get_audit_record_pdf("req-1")
+    assert exc_info.value.code == "AUDIT_NOT_FOUND"
+
+
+def test_get_audit_record_pdf_raises_when_a_200_is_not_a_pdf(make_client):
+    client, mock_request = make_client()
+    mock_request.return_value = FakeResponse(200, {"success": True}, headers={"Content-Type": "application/json"}, content=b"{}")
+    with pytest.raises(CourtMeshError):
+        client.get_audit_record_pdf("req-1")
+
+
+@pytest.mark.parametrize("bad", ["", ".", "..", "../records", "a/b", "x" * 129, "has space"])
+def test_get_audit_record_pdf_validates_the_request_id_before_sending(make_client, bad):
+    client, mock_request = make_client()
+    with pytest.raises(ValueError):
+        client.get_audit_record_pdf(bad)
+    mock_request.assert_not_called()
+
+
+def test_get_audit_record_pdf_retries_a_503_like_any_get(make_client, sleep_calls):
+    client, mock_request = make_client(max_retries=1)
+    mock_request.side_effect = [
+        FakeResponse(503, {"success": False, "code": "PDF_UNAVAILABLE", "message": "Try again."}, headers={"Content-Type": "application/json"}),
+        FakeResponse(200, headers={"Content-Type": "application/pdf"}, content=PDF_BYTES),
+    ]
+    assert client.get_audit_record_pdf("req-1") == PDF_BYTES
+    assert mock_request.call_count == 2
 
 
 # -- 19. GET /reference/courts --------------------------------------------------

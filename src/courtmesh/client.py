@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
@@ -36,9 +37,9 @@ from .models import (
     ActSummary,
     ActsPageResult,
     AnalyzeResponse,
-    AuditData,
     AuditDeleteResult,
-    AuditResult,
+    AuditRecord,
+    AuditRecordsData,
     CaseAnalysisResponse,
     CaseDetails,
     CaseDocuments,
@@ -84,6 +85,9 @@ DEFAULT_BASE_URL = "https://research.courtmesh.ai/api/v1/prod"
 # server bug always reports hasMore=True. This caps the pagination
 # generators so a caller loop can never spin forever.
 _MAX_SAFETY_PAGES = 10_000
+
+#: The `X-Request-Id` shape accepted by `GET /audit/{requestId}/pdf`.
+_AUDIT_REQUEST_ID = re.compile(r"\A[A-Za-z0-9_.-]{1,128}\Z")
 
 # Per endpoint request timeout defaults (R4), in seconds. Endpoints not
 # listed here use the client's general `timeout` (default 30).
@@ -1001,48 +1005,163 @@ class CourtMesh:
         body = self._transport.parse_envelope(response)
         return APIResponse(data=body.get("data", {}), meta=body.get("meta", {}), request_id=body.get("requestId"), replayed=body.get("replayed"))
 
-    # -- 17. GET /audit -------------------------------------------------------
+    # -- 17. GET /audit/records (access audit) ---------------------------------
 
     def audit(
         self,
-        organizationId: Optional[str] = None,
+        name: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        source: Optional[str] = None,
+        feature: Optional[str] = None,
+        apiKeyId: Optional[str] = None,
         userId: Optional[str] = None,
+        requestId: Optional[str] = None,
+        clientRef: Optional[str] = None,
+        order: Optional[str] = None,
+        cursor: Optional[str] = None,
         limit: Optional[int] = None,
-        offset: Optional[int] = None,
-        startDate: Optional[str] = None,
-        endDate: Optional[str] = None,
         timeout: Optional[float] = None,
-    ) -> AuditResult:
-        """Fetch this API key's own logged calls (or, for an org admin, an
-        organization's), with summary stats and a top-endpoints breakdown.
+    ) -> APIResponse[AuditRecordsData]:
+        """One page of your organisation's access audit, ``GET /audit/records``.
+
+        Every call made with the organisation's keys and every search made on
+        the website by its users, newest first, each naming the key or user
+        that ran it. Free and unmetered. Needs the ``account`` scope.
+
+        A key owned by an organisation admin sees every record of the
+        organisation; any other key sees only its own records. For an
+        organisation without access audit switched on, the list is empty and
+        ``result.data["auditEnabled"]`` is False. Page with ``cursor``: pass
+        ``result.data["nextCursor"]`` until it is None, or use ``iter_audit``.
+        The full input and response of a record are in its PDF, see
+        ``get_audit_record_pdf``.
+
+        The older ``GET /audit`` call history was retired on 21 Nov 2026 and
+        answers 410 ``ENDPOINT_MOVED``.
 
         Args:
-            organizationId: must be the caller's own organization, or
-                `PermissionDeniedError`.
-            userId: must be the caller's own id, or (for an org admin) a
-                teammate's, or `PermissionDeniedError`.
-            limit: 1 to 200, default 50.
-            offset: default 0.
-            startDate: ISO 8601.
-            endDate: ISO 8601.
+            name: a screened name or search text. Matches the exact text, or
+                any entry containing every whole word given, regardless of
+                case, punctuation and word order. At most 300 characters.
+            from_date: records at or after this time (sent as ``from``). A
+                date with no time means the start of that day in India time.
+            to_date: records at or before this time (sent as ``to``). A date
+                with no time means the end of that day in India time.
+            source: ``"api"`` or ``"web"``.
+            feature: one check by its label, for example ``"Party screen"``.
+            apiKeyId: only this key. Narrows what you may see, never widens it.
+            userId: only this user. Narrows what you may see, never widens it.
+            requestId: the ``X-Request-Id`` a call returned.
+            clientRef: your ``X-Client-Reference``, or a batch item ``clientRef``.
+            order: ``"newest"`` (default) or ``"oldest"``. Keep the same order
+                when passing a cursor.
+            cursor: the ``nextCursor`` of the previous page.
+            limit: 1 to 100, default 50. Anything else raises ``ValueError``
+                before a request is sent.
         """
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100):
+            raise ValueError("limit must be a whole number from 1 to 100.")
         params: Dict[str, Any] = {}
         _set_if_present(
             params,
-            organizationId=organizationId,
+            name=name,
+            **{"from": from_date, "to": to_date},
+            source=source,
+            feature=feature,
+            apiKeyId=apiKeyId,
             userId=userId,
+            requestId=requestId,
+            clientRef=clientRef,
+            order=order,
+            cursor=cursor,
             limit=limit,
-            offset=offset,
-            startDate=startDate,
-            endDate=endDate,
         )
-        response = self._transport.request("GET", "/audit", params=params or None, timeout=timeout)
+        response = self._transport.request("GET", "/audit/records", params=params or None, timeout=timeout)
         body = self._transport.parse_envelope(response)
-        return AuditResult(
+        return APIResponse(
             data=body.get("data", {}),
-            pagination=body.get("pagination", {}),
+            meta=body.get("meta", {}),
             request_id=body.get("requestId"),
+            replayed=body.get("replayed"),
         )
+
+    def iter_audit(
+        self,
+        name: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        source: Optional[str] = None,
+        feature: Optional[str] = None,
+        apiKeyId: Optional[str] = None,
+        userId: Optional[str] = None,
+        requestId: Optional[str] = None,
+        clientRef: Optional[str] = None,
+        order: Optional[str] = None,
+        limit: Optional[int] = None,
+        max_pages: Optional[int] = None,
+    ) -> Iterator[AuditRecord]:
+        """Yield every access audit record matching the filters, following
+        ``nextCursor`` until it is None. The same filters and ``order`` are
+        sent on every page. Same arguments as ``audit``."""
+        cursor: Optional[str] = None
+        hard_cap = _MAX_SAFETY_PAGES if max_pages is None else min(max_pages, _MAX_SAFETY_PAGES)
+        for _ in range(hard_cap):
+            result = self.audit(
+                name=name,
+                from_date=from_date,
+                to_date=to_date,
+                source=source,
+                feature=feature,
+                apiKeyId=apiKeyId,
+                userId=userId,
+                requestId=requestId,
+                clientRef=clientRef,
+                order=order,
+                cursor=cursor,
+                limit=limit,
+            )
+            for item in result.data.get("items") or []:
+                yield item
+            next_cursor = result.data.get("nextCursor")
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+                return
+            cursor = next_cursor
+
+    # -- GET /audit/{requestId}/pdf -----------------------------------------------
+
+    def get_audit_record_pdf(self, request_id: str, timeout: Optional[float] = None) -> bytes:
+        """The access audit record of one call as a CourtMesh branded PDF,
+        returned as bytes, ``GET /audit/{requestId}/pdf``.
+
+        ``request_id`` is the ``X-Request-Id`` the call returned (also on each
+        record as ``requestId``). Free and unmetered; at most 30 PDFs a minute
+        per key.
+
+        The record is written just after the call's response is sent, so a
+        fetch in the same instant can raise ``NotFoundError``
+        (``code == "AUDIT_NOT_FOUND"``): wait a second and ask again. A
+        request id you may not see answers the same. A 503 ``PDF_UNAVAILABLE``
+        is retried like any GET.
+
+        Raises ``ValueError`` before sending when ``request_id`` is not 1 to
+        128 letters, digits, ``_``, ``.`` or ``-``.
+        """
+        if not isinstance(request_id, str) or not _AUDIT_REQUEST_ID.match(request_id) or set(request_id) == {"."}:
+            raise ValueError("request_id must be the X-Request-Id a call returned: 1 to 128 letters, digits, _, . or -.")
+        response = self._transport.request(
+            "GET", "/audit/{}/pdf".format(quote(request_id, safe="")), timeout=timeout, accept="application/pdf"
+        )
+        if response.status_code >= 400:
+            self._transport.parse_envelope(response)
+        headers = response.headers
+        content_type = (headers.get("Content-Type") or headers.get("content-type") or "").lower()
+        if "application/pdf" not in content_type:
+            raise CourtMeshError(
+                "Expected a PDF but the response was {}.".format(content_type or "of no stated type"),
+                status_code=response.status_code,
+            )
+        return response.content
 
     # -- DELETE /audit (API 1.8.0) ----------------------------------------------
 
@@ -1051,15 +1170,15 @@ class CourtMesh:
     ) -> APIResponse[AuditDeleteResult]:
         """Permanently delete this API key's own activity before a time.
 
-        WARNING: this cannot be undone. The calls before `before` are no
-        longer listed by `audit()`, and the request details kept with them
+        WARNING: this cannot be undone. The calls before `before` are removed
+        from the key's call history, and the request details kept with them
         for your account (what was sent, IP address, user agent) are erased.
         Only the calling key's own activity is touched; other keys on the
         account are not. What you were charged stays on your invoices,
         credit balance and usage totals. A separate security log keeps its
         own record of account activity.
 
-        Needs the `account` scope, like `audit()`. Free and unmetered.
+        Needs the `account` scope. Free and unmetered.
 
         A large history is removed in parts: when `result.data["complete"]`
         is False, call this again with the same `before` to finish.
@@ -1069,7 +1188,7 @@ class CourtMesh:
         server: a connection or timeout error, or a 502, 503 or 504
         response, is raised at once (a connection or timeout error as
         `CourtMeshError` with no `status_code`), since the outcome is then
-        unknown. Check with `audit()` before sending it again. A 429
+        unknown. Sending the same request again yourself is safe. A 429
         `RATE_LIMITED` is a refusal before any work and is retried as usual.
 
         Args:

@@ -74,6 +74,10 @@ if Literal is not None:
         "UPSTREAM_UNAVAILABLE",
         "PARTY_PROFILE_FULL_UNAVAILABLE",
         "PARTY_PROFILE_TOO_MANY_ACTIVE",
+        "AUDIT_NOT_FOUND",
+        "AUDIT_UNAVAILABLE",
+        "PDF_UNAVAILABLE",
+        "ENDPOINT_MOVED",
     ]
 else:  # pragma: no cover
     ApiRefusalCode = str  # type: ignore[assignment,misc]
@@ -130,6 +134,10 @@ API_REFUSAL_CODES: Tuple[str, ...] = (
     "UPSTREAM_UNAVAILABLE",
     "PARTY_PROFILE_FULL_UNAVAILABLE",
     "PARTY_PROFILE_TOO_MANY_ACTIVE",
+    "AUDIT_NOT_FOUND",
+    "AUDIT_UNAVAILABLE",
+    "PDF_UNAVAILABLE",
+    "ENDPOINT_MOVED",
 )
 
 #: 429 codes safe to retry automatically. Never a daily/monthly cap code.
