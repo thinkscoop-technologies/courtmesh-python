@@ -3,14 +3,15 @@
 
 class FakeResponse:
     """Just enough of `requests.Response` for the SDK's transport code:
-    `status_code`, `headers`, `reason` and a `json()` method.
+    `status_code`, `headers`, `reason`, `content` and a `json()` method.
     """
 
-    def __init__(self, status_code, json_data=None, headers=None, reason=""):
+    def __init__(self, status_code, json_data=None, headers=None, reason="", content=b""):
         self.status_code = status_code
         self._json_data = json_data
         self.headers = headers or {}
         self.reason = reason
+        self.content = content
 
     def json(self):
         if self._json_data is None:

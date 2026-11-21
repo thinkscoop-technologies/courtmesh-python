@@ -122,6 +122,7 @@ class HTTPTransport:
         idempotency_key: Optional[str] = None,
         retry_after_dispatch: Optional[bool] = None,
         retryable_503_codes: Optional[FrozenSet[str]] = None,
+        accept: Optional[str] = None,
     ) -> requests.Response:
         """Issue one request, retrying per the rules documented on
         `CourtMesh.__init__`.
@@ -142,9 +143,14 @@ class HTTPTransport:
             retryable_503_codes: when given, a 503 is retried (under the
                 rules above) only when its `code` is in this set. Used where
                 some 503s of an endpoint leave the charge outcome unknown.
+            accept: a media type asked for ahead of JSON, for example
+                `application/pdf`. Error bodies are still JSON.
         """
         url = "{}{}".format(self.base_url, path)
-        headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+        headers = {
+            "Accept": "{}, application/json".format(accept) if accept else "application/json",
+            "User-Agent": USER_AGENT,
+        }
         if require_auth:
             headers.update(self._auth_headers())
         if idempotency_key:
